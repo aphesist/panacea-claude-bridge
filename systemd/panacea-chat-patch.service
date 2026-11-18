@@ -1,0 +1,6 @@
+[Unit]
+Description=Re-apply local Claude patch to Panacea's island chat
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I %h/.config/hypr/custom/bin/chat-patch.py
