@@ -7,6 +7,7 @@
 ![Panacea](https://img.shields.io/badge/Panacea-island_chat-18181b)
 ![Claude Code](https://img.shields.io/badge/Claude_Code-claude_--p-ffffff)
 ![No API key](https://img.shields.io/badge/API_key-not_needed-888888)
+![Approvals](https://img.shields.io/badge/actions-Allow_%2F_Deny_in_the_island-888888)
 ![License](https://img.shields.io/badge/license-MIT-d71920)
 
 </div>
@@ -37,8 +38,13 @@ island chat ──POST /v1/chat/completions──▶ bridge.py (127.0.0.1:47321)
 ```
 
 - **Context:** the bridge keeps one Claude Code session per conversation and `--resume`s it, so it never resends the history. The new-chat button, or any history that doesn't match its last reply, starts a fresh session.
-- **Images:** attached images are saved to `~/.cache/panacea-claude/attachments/`, and Claude may `Read` that folder only.
-- **Sessions:** they show up in Claude Code (and the desktop app) under the project `~/.local/share/panacea-claude`.
+- **Images and files:** attached images are saved to `~/.cache/panacea-claude/attachments/` and given to Claude as paths.
+- **Shared context:** Claude runs from your home folder, so it shares Claude Code's memory and `CLAUDE.md` with your other sessions there, and its sessions show up in Claude Code and the desktop app under that project.
+- **What it may do:**
+  - without asking: web search, reading web pages, reading files (except secrets: `~/.ssh`, `~/.gnupg`, keyrings, Proton data, the bridge token);
+  - with your approval: everything else (running commands, opening apps, editing files). Each request shows Panacea's approval card in the island with Allow / Deny; no answer within 30 s means denied. Claude Code itself lets clearly harmless commands such as `echo` through without asking;
+  - root work goes through `pkexec`, so system-file edits also ask for your password in the island.
+- **Long tasks:** the chat script's 90 s limit is raised to 10 minutes, to leave room for approvals.
 
 ### What Claude can do from here
 

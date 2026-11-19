@@ -1,8 +1,9 @@
 [Unit]
-Description=Watch Panacea's ChatView.qml for updates
+Description=Watch Panacea's ChatView.qml and chat.py for updates
 
 [Path]
 PathChanged=%h/.config/panacea/ChatView.qml
+PathChanged=%h/.config/panacea/scripts/chat.py
 Unit=panacea-chat-patch.service
 
 [Install]

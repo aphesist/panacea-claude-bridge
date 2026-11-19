@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v3"
+VERSION = "v4"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -117,7 +117,28 @@ def write_atomic(p, text):
     os.replace(tmp, p)
 
 
+CHAT_PY = os.path.expanduser("~/.config/panacea/scripts/chat.py")
+CHAT_PY_OLD = "urlopen(req,timeout=90)"
+CHAT_PY_NEW = "urlopen(req,timeout=600)  # panacea-claude: room for approval cards"
+
+
+def patch_chat_py():
+    """The chat script gives up after 90 s; Claude may wait on approval cards."""
+    try:
+        s = read(CHAT_PY)
+    except OSError:
+        return
+    if CHAT_PY_NEW in s:
+        return
+    if s.count(CHAT_PY_OLD) != 1:
+        print("chat-patch: chat.py timeout anchor not found - long tasks may time out", file=sys.stderr)
+        return
+    write_atomic(CHAT_PY, s.replace(CHAT_PY_OLD, CHAT_PY_NEW))
+    os.chmod(CHAT_PY, 0o755)
+
+
 def main() -> int:
+    patch_chat_py()
     try:
         cur = read(QML)
     except OSError as e:

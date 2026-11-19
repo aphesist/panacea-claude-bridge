@@ -6,11 +6,17 @@ This answers that format on 127.0.0.1 only and forwards each message to
 `claude -p`, resuming the same Claude Code session while the conversation
 continues, so Claude keeps context without resending the whole history.
 
+Claude runs from your home folder, so it shares Claude Code's memory and
+CLAUDE.md for it (the same "system" context as your terminal sessions).
+
 Security:
   - listens on 127.0.0.1 only, and requires the bearer token in
     ~/.config/panacea-claude/token (so web pages can't use it via localhost)
-  - Claude gets read-only web tools, plus Read limited to this bridge's
-    attachment folder; no shell, no file edits
+  - without asking: web search, reading web pages, reading files (except
+    secrets: ~/.ssh, ~/.gnupg, keyrings, this bridge's token...)
+  - everything else (commands, opening apps, file edits) shows an Allow/Deny
+    card in the island (approve-mcp.py); no answer within 30 s = denied.
+    Root work goes through pkexec, i.e. Panacea's own password prompt.
 """
 import base64, hashlib, json, mimetypes, os, pathlib, secrets, subprocess, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,16 +26,27 @@ HOST, PORT = "127.0.0.1", 47321
 CLAUDE = str(HOME / ".local/bin/claude")
 CONF = HOME / ".config/panacea-claude"
 STATE = HOME / ".local/state/panacea-claude/state.json"
-WORKDIR = HOME / ".local/share/panacea-claude"           # sessions are grouped under this "project"
+WORKDIR = HOME                                           # same project (memory, CLAUDE.md) as your sessions
+APPROVE = pathlib.Path(__file__).resolve().with_name("approve-mcp.py")
 ATTACH = HOME / ".cache/panacea-claude/attachments"
-TIMEOUT = 85                                             # chat.py gives up after 90 s
+TIMEOUT = 590                                            # chat.py (patched) waits 600 s
 
 SYSTEM = (
     "You are answering in a small chat panel on the user's Linux desktop "
     "(the Panacea shell's island, Hyprland on Arch). The panel shows plain text only: "
     "do not use Markdown headings, tables or bold; short paragraphs and simple '-' lists are fine. "
-    "Keep answers concise unless asked for detail. Attached files are given as paths you may Read."
+    "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
+    "You are the user's system helper for this machine: you can search the web, read files, run commands, "
+    "open apps (e.g. `hyprctl dispatch exec <app>` or `xdg-open <file-or-url>`) and edit files. "
+    "Commands and edits show the user an Allow/Deny card; if one is denied, say so and stop. "
+    "For anything that needs root, use `pkexec <command>` (never sudo): it asks for the password in the island. "
+    "Your memory and notes are shared with the user's other Claude Code sessions on this machine."
 )
+ALLOWED = ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]
+DENIED = [f"Read({p})" for p in ("~/.ssh/**", "~/.gnupg/**", "~/.local/share/keyrings/**",
+                                 "~/.config/panacea-claude/**", "~/.config/proton*/**",
+                                 "~/.local/share/proton*/**", "~/.local/share/panacea/vault*")]
+MCP = json.dumps({"mcpServers": {"panacea": {"command": "python3", "args": ["-I", str(APPROVE)]}}})
 
 for d in (CONF, STATE.parent, WORKDIR, ATTACH):
     d.mkdir(parents=True, exist_ok=True)
@@ -94,8 +111,9 @@ def ask_claude(messages, model):
 
     cmd = [CLAUDE, "-p", "--output-format", "json",
            "--append-system-prompt", SYSTEM,
-           "--tools", "Read", "WebSearch", "WebFetch",
-           "--allowedTools", f"Read(/{ATTACH}/**)", "WebSearch", "WebFetch"]
+           "--mcp-config", MCP, "--strict-mcp-config",
+           "--permission-prompt-tool", "mcp__panacea__approve",
+           "--allowedTools", *ALLOWED, "--disallowedTools", *DENIED]
     if model and model not in ("claude", "default"):
         cmd += ["--model", model]
     if resume:
@@ -137,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 answer = ask_claude(req.get("messages") or [], req.get("model", ""))
         except subprocess.TimeoutExpired:
-            answer = "Claude took too long (over 85 s) - try a shorter question."
+            answer = "Claude took too long (over 10 minutes) and was stopped."
         except Exception as e:
             answer = f"Claude bridge error: {e}"
         self.reply(200, {"object": "chat.completion",

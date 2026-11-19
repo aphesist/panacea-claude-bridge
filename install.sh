@@ -12,10 +12,12 @@ say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
 say "Bridge + chat patcher"
 install -Dm644 "$HERE/bridge.py" "$HOME/.local/lib/panacea-claude/bridge.py"
+install -Dm644 "$HERE/approve-mcp.py" "$HOME/.local/lib/panacea-claude/approve-mcp.py"
 install -Dm755 "$HERE/chat-patch.py" "$CFG/hypr/custom/bin/chat-patch.py"
 for u in "$HERE"/systemd/*; do install -Dm644 "$u" "$CFG/systemd/user/$(basename "$u")"; done
 systemctl --user daemon-reload
 systemctl --user enable --now panacea-claude.service panacea-chat-patch.path
+systemctl --user restart panacea-claude.service panacea-chat-patch.path
 
 say "Token (created by the bridge on first start, 0600)"
 T="$CFG/panacea-claude/token"
