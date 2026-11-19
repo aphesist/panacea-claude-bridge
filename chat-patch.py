@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v8"
+VERSION = "v9"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -87,6 +87,10 @@ REPLACEMENTS = [
     # root kept it for itself, a FocusScope passes it on to the input.
     ("Item {\n    id: view\n", "FocusScope {   " + TAG + "\n    id: view\n"),
     ("id: input; width: inputScroll.width;", "id: input; focus: true; width: inputScroll.width;"),
+    # Ctrl+N: new chat, like the + button
+    ("if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {",
+     "if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_N) { if (!view.busy) { view.sys.islandChatMessages = []; view.attachments = []; input.text = \"\"; } event.accepted = true; }\n"
+     "                                else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_V) {"),
     # no "agent event" cards in the chat: Panacea copies every notification
     # mentioning Claude/Codex into the chat tab (Claude desktop's session
     # status updates piled up there and could not be dismissed)
