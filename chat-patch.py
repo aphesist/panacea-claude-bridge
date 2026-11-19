@@ -18,47 +18,52 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v11"
+VERSION = "v13"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
-HEADER = '''        // ''' + TAG + ''': single Claude tab with model pills
+HEADER = '''        // ''' + TAG + ''': the model switcher (one segmented control) and a new-chat button.
+        // No logo or title here: the island's own tab already says Chat, and the
+        // pixel Claude marks Claude where it means something (working, asking).
         RowLayout {
             Layout.fillWidth: true
-            Layout.leftMargin: 8; Layout.rightMargin: 4
             spacing: 6
-            Image {
-                source: "file://" + Quickshell.env("HOME") + "/.config/panacea-claude/claude-logo.svg"
-                sourceSize: Qt.size(32, 32); Layout.preferredWidth: 16; Layout.preferredHeight: 16
-                smooth: true; mipmap: true
-            }
-            Text { text: "Claude"; color: view.sys.colFg; font { family: view.sys.fontBody; pixelSize: 13; bold: true } }
-            Item { Layout.fillWidth: true }
-            Repeater {
-                model: [{id: "opus", name: "Opus"}, {id: "sonnet", name: "Sonnet"}, {id: "haiku", name: "Haiku"}]
-                delegate: Rectangle {
-                    id: pill
-                    required property var modelData
-                    readonly property bool on: (view.sys.cfg.aiModel || "opus") === modelData.id
-                    implicitWidth: pillName.implicitWidth + 20; implicitHeight: 26; radius: 13
-                    color: on ? Qt.rgba(1, 1, 1, 0.14) : (pillMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.07) : "transparent")
-                    Behavior on color { ColorAnimation { duration: 150 } }
-                    Text {
-                        id: pillName; anchors.centerIn: parent
-                        text: pill.modelData.name
-                        color: pill.on ? view.sys.colFg : view.sys.colMuted
-                        font { family: view.sys.fontBody; pixelSize: 11; bold: pill.on }
-                    }
-                    MouseArea {
-                        id: pillMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: { view.sys.cfg.aiModel = pill.modelData.id; view.sys.saveCfg(); }
+            Rectangle {
+                implicitWidth: segRow.implicitWidth + 6; implicitHeight: 30; radius: 15
+                color: Qt.rgba(1, 1, 1, 0.04); border.color: view.sys.colLine; border.width: 1
+                Row {
+                    id: segRow; anchors.centerIn: parent; spacing: 2
+                    Repeater {
+                        model: [{id: "opus", name: "Opus"}, {id: "sonnet", name: "Sonnet"}, {id: "haiku", name: "Haiku"}]
+                        delegate: Rectangle {
+                            id: pill
+                            required property var modelData
+                            readonly property bool on: (view.sys.cfg.aiModel || "opus") === modelData.id
+                            width: pillName.implicitWidth + 24; height: 24; radius: 12
+                            color: on ? Qt.rgba(1, 1, 1, 0.14) : (pillMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent")
+                            Behavior on color { ColorAnimation { duration: 150 } }
+                            Text {
+                                id: pillName; anchors.centerIn: parent
+                                text: pill.modelData.name
+                                color: pill.on ? view.sys.colFg : view.sys.colMuted
+                                font { family: view.sys.fontBody; pixelSize: 11; bold: pill.on }
+                            }
+                            MouseArea {
+                                id: pillMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                onClicked: { view.sys.cfg.aiModel = pill.modelData.id; view.sys.saveCfg(); }
+                            }
+                        }
                     }
                 }
             }
+            Item { Layout.fillWidth: true }
             Rectangle {
-                implicitWidth: 26; implicitHeight: 26; radius: 13
-                color: newMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
-                Glyph { anchors.centerIn: parent; glyph: String.fromCodePoint(0xF0415); fontFam: view.sys.fontFam; size: 15; color: view.sys.colMuted }
+                implicitWidth: 30; implicitHeight: 30; radius: 15
+                color: newMouse.containsMouse && !view.busy ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                opacity: view.busy ? 0.35 : 1
+                Behavior on color { ColorAnimation { duration: 150 } }
+                Glyph { anchors.centerIn: parent; glyph: String.fromCodePoint(0xF0415); fontFam: view.sys.fontFam; size: 15
+                        color: newMouse.containsMouse ? view.sys.colFg : view.sys.colMuted }
                 MouseArea {
                     id: newMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                     enabled: !view.busy
@@ -78,7 +83,7 @@ ROW_END = '''        Item {
             visible: view.service !== "chat"'''
 
 LIVE_PROPS = '    property bool busy: false\n    // The chat page is rebuilt whenever you come back to it (and when an approval\n    // is answered from the notification, which swaps the page out), and its\n    // request dies with the old page. The bridge keeps working regardless and\n    // records the reply in live.json, so a page only needs to catch up:\n    // still working -> show it; finished -> take the reply that answers our message.\n    property bool ownReq: false          // our own request is still out\n    property string fallbackAnswer: ""   // chat.py\'s answer, used if the bridge left no record\n    function awaiting() { var m = view.sys.islandChatMessages; return m.length > 0 && m[m.length - 1].role === "user"; }\n    function finish(answer, cards) {\n        if (view.awaiting()) { var a = view.sys.islandChatMessages.slice(); a.push({ role: "assistant", content: answer, cards: cards || [] }); view.sys.islandChatMessages = a; }\n        view.busy = false; view.fallbackAnswer = "";\n    }\n    function sync() {\n        var l = view.live || {}, m = view.sys.islandChatMessages;\n        if (!view.awaiting()) { if (!l.busy && !view.ownReq) view.busy = false; return; }\n        var at = m[m.length - 1].at;\n        if (l.busy) { if (!view.ownReq && (!at || l.at === at || l.at === undefined)) view.busy = true; return; }\n        if (l.last && at && l.last.at === at) { view.finish(l.last.answer || "Couldn\'t get a reply.", l.last.cards); return; }\n        if (view.ownReq) return;                       // not recorded yet: our request is still coming\n        if (view.fallbackAnswer) view.finish(view.fallbackAnswer, []);\n        else if (view.busy) view.finish("Couldn\'t get a reply.", []);\n    }\n\n    // live progress + in-chat approval cards, written by bridge.py / approve-mcp.py\n    readonly property string pcDir: Quickshell.env("HOME") + "/.cache/panacea-claude/"\n    readonly property string pcLogo: "file://" + Quickshell.env("HOME") + "/.config/panacea-claude/claude-logo.svg"\n    property var live: ({ busy: false, steps: [] })\n    property var approval: ({})\n    FileView { id: liveFile; path: view.pcDir + "live.json"; printErrors: false\n        onLoaded: { try { view.live = JSON.parse(text()); } catch (e) { return; } view.sync(); } }\n    FileView { id: approvalFile; path: view.pcDir + "approval.json"; printErrors: false\n        onLoaded: { try { view.approval = JSON.parse(text()) || ({}); } catch (e) { view.approval = ({}); } } }\n    Timer { running: true; interval: 1; onTriggered: { liveFile.reload(); approvalFile.reload(); } }   // catch up on open\n    Timer { interval: 350; repeat: true; running: view.busy; triggeredOnStart: true\n        onTriggered: { liveFile.reload(); approvalFile.reload(); } }\n    onBusyChanged: if (!busy) { view.live = ({ busy: false, steps: [] }); view.approval = ({}); }\n    Process { id: answerProc }\n    function answerApproval(choice) {\n        if (!view.approval || !view.approval.id) return;\n        answerProc.command = ["python3", "-I", Quickshell.env("HOME") + "/.local/lib/panacea-claude/approve-mcp.py",\n                              "--answer", String(view.approval.id), choice];\n        answerProc.running = true;\n        view.approval = ({});\n    }\n'
-LIVE_BLOCK = '                // what Claude is doing right now, and its approval requests\n                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 7\n                    Row {\n                        spacing: 8\n                        Image {\n                            source: view.pcLogo; width: 14; height: 14; sourceSize: Qt.size(28, 28); smooth: true\n                            anchors.verticalCenter: parent.verticalCenter\n                            SequentialAnimation on opacity { running: view.busy; loops: Animation.Infinite\n                                NumberAnimation { to: 0.3; duration: 700; easing.type: Easing.InOutSine }\n                                NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutSine } }\n                            RotationAnimation on rotation { running: view.busy; loops: Animation.Infinite; from: 0; to: 360; duration: 6000 }\n                        }\n                        Text { text: (view.approval && view.approval.id) ? "Waiting for you" : "Working"\n                               color: view.sys.colMuted; font { pixelSize: 12; family: view.sys.fontBody } }\n                    }\n                    Repeater {\n                        model: (view.live.steps || []).slice(-6)\n                        delegate: Text {\n                            required property var modelData\n                            width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                            maximumLineCount: modelData.k === "text" ? 4 : 3; elide: Text.ElideRight\n                            leftPadding: modelData.k === "text" ? 0 : 22\n                            text: (modelData.k === "tool" ? "›  " : "") + modelData.t\n                            color: modelData.k === "text" ? view.sys.colFg : view.sys.colMuted\n                            opacity: modelData.k === "think" ? 0.75 : 1\n                            font { pixelSize: 12; italic: modelData.k === "think" }\n                        }\n                    }\n                    Repeater { model: view.live.cards || []\n                               delegate: PanaceaClaudeCard { sys: view.sys; required property var modelData; card: modelData; width: parent.width } }\n                    Rectangle {\n                        visible: !!(view.approval && view.approval.id)\n                        width: parent.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 28; radius: 14\n                        color: Qt.rgba(1, 1, 1, 0.05); border.color: Qt.rgba(1, 1, 1, 0.14); border.width: 1\n                        PanaceaClaudeCritter { id: apCritter; x: 14; y: 16; px: 3; waving: parent.visible }\n                        Column {\n                            id: apCol; x: apCritter.x + apCritter.width + 14; y: 14; width: parent.width - x - 14; spacing: 9\n                            Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                                   text: "Claude wants to " + String((view.approval && view.approval.title) || "").toLowerCase()\n                                   color: view.sys.colFg; font { pixelSize: 13; bold: true; family: view.sys.fontBody } }\n                            Text { visible: text.length > 0; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                                   text: String((view.approval && view.approval.why) || "")\n                                   color: view.sys.colMuted; font.pixelSize: 12 }\n                            Rectangle {\n                                width: parent.width; height: apBody.implicitHeight + 16; radius: 8\n                                color: Qt.rgba(0, 0, 0, 0.55); border.color: view.sys.colLine; border.width: 1\n                                Text { id: apBody; x: 10; y: 8; width: parent.width - 20; wrapMode: Text.WrapAnywhere\n                                       textFormat: Text.PlainText; maximumLineCount: 10; elide: Text.ElideRight\n                                       text: String((view.approval && view.approval.body) || "")\n                                       color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 11 } }\n                            }\n                            Row {\n                                anchors.right: parent.right; spacing: 8\n                                Repeater {\n                                    model: [{ t: "Deny", c: "deny" }, { t: "Allow", c: "allow" }]\n                                    delegate: Rectangle {\n                                        required property var modelData\n                                        width: 86; height: 30; radius: 15\n                                        color: modelData.c === "allow" ? view.sys.colFg\n                                               : (apMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.08))\n                                        Text { anchors.centerIn: parent; text: modelData.t\n                                               color: modelData.c === "allow" ? view.sys.colBg : view.sys.colFg\n                                               font { pixelSize: 12; bold: modelData.c === "allow" } }\n                                        MouseArea { id: apMa; anchors.fill: parent; hoverEnabled: true\n                                                    cursorShape: Qt.PointingHandCursor; onClicked: view.answerApproval(modelData.c) }\n                                    }\n                                }\n                            }\n                        }\n                    }\n                }\n'
+LIVE_BLOCK = '                // what Claude is doing right now, and its approval requests\n                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 7\n                    // the pixel Claude walks while it works, and waves when it needs you\n                    Row {\n                        spacing: 10\n                        PanaceaClaudeCritter { px: 2; waving: !!(view.approval && view.approval.id); anchors.verticalCenter: parent.verticalCenter }\n                        Text { text: (view.approval && view.approval.id) ? "Waiting for you" : "Working"\n                               anchors.verticalCenter: parent.verticalCenter\n                               color: view.sys.colMuted; font { pixelSize: 12; family: view.sys.fontBody } }\n                    }\n                    Repeater {\n                        // while a card is up, its own step line would only repeat the card\'s reason\n                        model: (view.live.steps || []).filter(function (st, i, all) {\n                            return !(view.approval && view.approval.id && i === all.length - 1 && st.k === "tool"); }).slice(-6)\n                        delegate: Text {\n                            required property var modelData\n                            width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                            maximumLineCount: modelData.k === "text" ? 4 : 3; elide: Text.ElideRight\n                            leftPadding: 0\n                            text: (modelData.k === "tool" ? "›  " : "") + modelData.t   // steps share the reply\'s left edge\n                            color: modelData.k === "text" ? view.sys.colFg : view.sys.colMuted\n                            opacity: modelData.k === "think" ? 0.75 : 1\n                            font { pixelSize: 12; italic: modelData.k === "think" }\n                        }\n                    }\n                    Repeater { model: view.live.cards || []\n                               delegate: PanaceaClaudeCard { sys: view.sys; required property var modelData; card: modelData; width: parent.width } }\n                    Rectangle {\n                        visible: !!(view.approval && view.approval.id)\n                        width: parent.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 28; radius: 14\n                        color: Qt.rgba(1, 1, 1, 0.05); border.color: Qt.rgba(1, 1, 1, 0.14); border.width: 1\n                        PanaceaClaudeCritter { id: apCritter; x: 14; y: 16; px: 3; waving: parent.visible }\n                        Column {\n                            id: apCol; x: apCritter.x + apCritter.width + 14; y: 14; width: parent.width - x - 14; spacing: 9\n                            Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                                   text: "Claude wants to " + String((view.approval && view.approval.title) || "").toLowerCase()\n                                   color: view.sys.colFg; font { pixelSize: 13; bold: true; family: view.sys.fontBody } }\n                            Text { visible: text.length > 0; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                                   text: String((view.approval && view.approval.why) || "")\n                                   color: view.sys.colMuted; font.pixelSize: 12 }\n                            Rectangle {\n                                width: parent.width; height: apBody.implicitHeight + 16; radius: 8\n                                color: Qt.rgba(0, 0, 0, 0.55); border.color: view.sys.colLine; border.width: 1\n                                Text { id: apBody; x: 10; y: 8; width: parent.width - 20; wrapMode: Text.WrapAnywhere\n                                       textFormat: Text.PlainText; maximumLineCount: 10; elide: Text.ElideRight\n                                       text: String((view.approval && view.approval.body) || "")\n                                       color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 11 } }\n                            }\n                            Row {\n                                anchors.right: parent.right; spacing: 8\n                                Repeater {\n                                    model: [{ t: "Deny", c: "deny" }, { t: "Allow", c: "allow" }]\n                                    delegate: Rectangle {\n                                        required property var modelData\n                                        width: 86; height: 30; radius: 15\n                                        color: modelData.c === "allow" ? view.sys.colFg\n                                               : (apMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.08))\n                                        Text { anchors.centerIn: parent; text: modelData.t\n                                               color: modelData.c === "allow" ? view.sys.colBg : view.sys.colFg\n                                               font { pixelSize: 12; bold: modelData.c === "allow" } }\n                                        MouseArea { id: apMa; anchors.fill: parent; hoverEnabled: true\n                                                    cursorShape: Qt.PointingHandCursor; onClicked: view.answerApproval(modelData.c) }\n                                    }\n                                }\n                            }\n                        }\n                    }\n                }\n'
 MASCOT = '        // a little orange pixel Claude, walking in place\n        Item {\n            id: critter\n            anchors.horizontalCenter: parent.horizontalCenter\n            readonly property int px: 6\n            readonly property var body: ["..XXXXXXX..", "..XXXXXXX..", "..XEXXXEX..", "XXXXXXXXXXX",\n                                         "XXXXXXXXXXX", "..XXXXXXX.."]\n            readonly property var legs: [["..X.X.X.X.."], [".X.X.X.X..."]]\n            property int frame: 0\n            property bool blink: false\n            readonly property var rows: body.concat(legs[frame])\n            width: 11 * px; height: rows.length * px + 8\n            Timer { interval: 300; repeat: true; running: critter.visible; onTriggered: critter.frame = 1 - critter.frame }\n            Timer { interval: 3400; repeat: true; running: critter.visible\n                    onTriggered: { critter.blink = true; unblink.restart(); } }\n            Timer { id: unblink; interval: 160; onTriggered: critter.blink = false }\n            Item {\n                id: sprite; width: parent.width; height: critter.rows.length * critter.px\n                SequentialAnimation on y { running: critter.visible; loops: Animation.Infinite\n                    NumberAnimation { from: 4; to: 0; duration: 300; easing.type: Easing.OutQuad }\n                    NumberAnimation { from: 0; to: 4; duration: 300; easing.type: Easing.InQuad } }\n                Repeater {\n                    model: critter.rows.length * 11\n                    delegate: Rectangle {\n                        required property int index\n                        readonly property string ch: critter.rows[Math.floor(index / 11)].charAt(index % 11)\n                        x: (index % 11) * critter.px; y: Math.floor(index / 11) * critter.px\n                        width: critter.px; height: critter.px\n                        visible: ch !== "."\n                        color: ch === "E" && !critter.blink ? "#141414" : "#d97757"\n                    }\n                }\n            }\n        }\n'
 
 # Small QML types used by the patched ChatView, written next to it. (Separate
@@ -89,6 +94,9 @@ EXTRA = {
 }
 
 REPLACEMENTS = [
+    # the message box shares the left/right edges of the header, messages and cards
+    ('            Layout.leftMargin: 8; Layout.rightMargin: 8\n', '            Layout.leftMargin: 0; Layout.rightMargin: 0\n'),
+    ("width: scroll.availableWidth; spacing: 10", "width: scroll.availableWidth; spacing: 16"),
     ("""                Repeater {
                     model: view.sys.islandChatMessages
                     delegate: Rectangle {
@@ -100,27 +108,27 @@ REPLACEMENTS = [
                 }
 """, """                Repeater {
                     model: view.sys.islandChatMessages
-                    delegate: Item {
+                    delegate: Column {
                         id: msgItem
                         required property var modelData
                         readonly property bool mine: modelData.role === "user"
-                        width: parent.width; height: msgCol.implicitHeight
-                        // Claude's replies carry its logo, so the two sides never blur together
-                        Image { visible: !msgItem.mine; source: view.pcLogo; x: 0; y: 1; width: 16; height: 16
-                                sourceSize: Qt.size(32, 32); smooth: true }
-                        Column {
-                            id: msgCol; x: msgItem.mine ? 0 : 26; width: parent.width - x; spacing: 8
-                            // what Claude ran with your approval, and how it went
-                            Repeater { model: msgItem.modelData.cards || []
-                                       delegate: PanaceaClaudeCard { sys: view.sys; required property var modelData; card: modelData; width: msgCol.width } }
-                            Rectangle {
-                                width: parent.width; height: message.implicitHeight + (msgItem.mine ? 20 : 0); radius: 12
-                                visible: String(msgItem.modelData.content || "").length > 0
-                                color: msgItem.mine ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
-                                Text { id: message; x: msgItem.mine ? 12 : 0; y: msgItem.mine ? 10 : 0; width: parent.width - 2 * x
-                                       text: msgItem.modelData.content; color: view.sys.colFg; wrapMode: Text.Wrap
-                                       textFormat: Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }
-                            }
+                        width: parent.width; spacing: 8
+                        // what Claude ran with your approval, and how it went
+                        Repeater { model: msgItem.modelData.cards || []
+                                   delegate: PanaceaClaudeCard { sys: view.sys; required property var modelData; card: modelData; width: msgItem.width } }
+                        // yours: a bubble on the right; Claude's: plain text across the width
+                        Rectangle {
+                            visible: String(msgItem.modelData.content || "").length > 0
+                            anchors.right: msgItem.mine ? parent.right : undefined
+                            width: msgItem.mine ? message.width + 28 : parent.width
+                            height: message.implicitHeight + (msgItem.mine ? 20 : 0)
+                            radius: 16
+                            color: msgItem.mine ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                            Text { id: message
+                                   x: msgItem.mine ? 14 : 0; y: msgItem.mine ? 10 : 0
+                                   width: msgItem.mine ? Math.min(implicitWidth, msgItem.width * 0.78 - 28) : parent.width
+                                   text: msgItem.modelData.content; color: view.sys.colFg; wrapMode: Text.Wrap
+                                   textFormat: Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }
                         }
                     }
                 }
