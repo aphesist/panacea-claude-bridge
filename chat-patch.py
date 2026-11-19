@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v4"
+VERSION = "v5"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -119,7 +119,8 @@ def write_atomic(p, text):
 
 CHAT_PY = os.path.expanduser("~/.config/panacea/scripts/chat.py")
 CHAT_PY_OLD = "urlopen(req,timeout=90)"
-CHAT_PY_NEW = "urlopen(req,timeout=600)  # panacea-claude: room for approval cards"
+CHAT_PY_NEW = "urlopen(req,timeout=600)"   # room for approval cards (no inline comment: mid-line)
+CHAT_PY_BROKEN = "urlopen(req,timeout=600)  # panacea-claude: room for approval cards"   # chat-patch v4 bug
 
 
 def patch_chat_py():
@@ -128,6 +129,10 @@ def patch_chat_py():
         s = read(CHAT_PY)
     except OSError:
         return
+    if CHAT_PY_BROKEN in s:
+        s = s.replace(CHAT_PY_BROKEN, CHAT_PY_OLD)
+        write_atomic(CHAT_PY, s)
+        os.chmod(CHAT_PY, 0o755)
     if CHAT_PY_NEW in s:
         return
     if s.count(CHAT_PY_OLD) != 1:
