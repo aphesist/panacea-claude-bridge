@@ -99,8 +99,9 @@ CLAUDEZILLA = HOME / ".local/share/claudezilla/mcp/server.js"
 FX = "mcp__claudezilla__firefox_"
 FX_READ = [FX + t for t in (
     "get_content", "get_accessibility_snapshot", "get_page_state", "diff_page_state", "find",
-    "get_element", "get_tabs", "list_all_tabs", "screenshot", "get_console", "get_network",
+    "get_element", "get_tabs", "screenshot", "get_console", "get_network",
     "diagnose", "wait_for", "scroll", "loop_status", "get_slot_requests", "activate")]
+FX_YOURS = [FX + "list_all_tabs", FX + "attach_tab"]   # your own tabs: always a card, whatever the mode (ask beats allow)
 FX_ACT = [FX + t for t in (
     "navigate", "create_window", "click", "type", "press_key", "close_tab", "close_window",
     "attach_tab", "detach_tab", "resize_window", "set_viewport", "set_config", "set_private_mode",
@@ -118,6 +119,15 @@ BROWSER_PROMPT = (
     "unless they want them kept. Never buy, send, post, delete or change account settings unless they asked "
     "for exactly that."
 )
+BROWSER_PROMPT_SPACE = (
+    "You can use the owner's own Zen browser through the claudezilla tools (firefox_*), signed in as them. "
+    "Every tab you open goes, in the background, into their \"Claude\" Space; you can only act on tabs you opened. "
+    "Their other tabs are theirs: only touch one when they explicitly ask, via firefox_list_all_tabs and "
+    "firefox_attach_tab (both show them a card), and firefox_detach_tab when done. Never switch their view or Space. "
+    "Read pages with firefox_get_accessibility_snapshot (cheaper than screenshots). Leave your tabs open unless they "
+    "ask you to close them. Never buy, send, post, delete or change account settings unless they asked for exactly that. "
+    "If a tool says the extension isn't connected, ask them to open Zen."
+)
 BROWSER_BLOCKED = (
     "The browser tools are switched off for this run: the owner's own Zen profile still has the Claudezilla "
     "add-on, and Claude may only use its separate profile. If they ask for the browser, tell them to remove "
@@ -134,7 +144,7 @@ def own_zen_has_claudezilla():
             continue
         try:
             # removed in about:addons = pendingUninstall (and inactive) until Zen restarts: that one is gone
-            if any(a.get("id") == "claudezilla@boot.industries" and not a.get("pendingUninstall")
+            if any(a.get("id") in ("claudezilla@boot.industries", "claude-zen@aphesist") and not a.get("pendingUninstall")
                    for a in json.loads(ej.read_text()).get("addons", [])):
                 return True
         except (OSError, ValueError):
@@ -153,7 +163,8 @@ def run_config():
     """-> (mcp json, allowed, ask, denied, extra prompt) for this run, from the island's settings."""
     cfg = panacea_cfg()
     servers, allowed, ask, denied, extra = dict(MCP_PANACEA), list(ALLOWED), list(ASK), list(DENIED), ""
-    if cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists() and own_zen_has_claudezilla():
+    space = cfg.get("claudeBrowserMode", "space") != "profile"   # space: a Space in your own Zen
+    if cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists() and not space and own_zen_has_claudezilla():
         extra = BROWSER_BLOCKED          # sandbox broken: no browser at all until it's fixed
     elif cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists():
         # one agent for every message (its tabs stay open and usable between replies);
@@ -161,7 +172,9 @@ def run_config():
         env = {"CLAUDEZILLA_AGENT_ID": "agent_panacea_island", "CLAUDEZILLA_KEEP_TABS": "1",
                "CLAUDEZILLA_AGENT_TIMEOUT_MS": "0"}
         servers["claudezilla"] = {"command": "/usr/bin/node", "args": [str(CLAUDEZILLA), "--tools", "all"], "env": env}
-        if cfg.get("claudeBrowserAutostart", True):      # Claude's Zen starts on its first browser call
+        if space:
+            env["CLAUDEZILLA_ZEN_SPACE"] = "1"
+        elif cfg.get("claudeBrowserAutostart", True):      # Claude's Zen starts on its first browser call
             env |= {
                 "CLAUDEZILLA_AUTOSTART_CMD": json.dumps(["systemctl", "--user", "start", "zen-claude.service"]),
                 "CLAUDEZILLA_AUTOSTART_WAIT_MS": "60000"}
@@ -174,7 +187,8 @@ def run_config():
             allowed += FX_READ
             ask += FX_ACT
         denied += FX_NEVER
-        extra = BROWSER_PROMPT
+        ask += FX_YOURS
+        extra = BROWSER_PROMPT_SPACE if space else BROWSER_PROMPT
     return json.dumps({"mcpServers": servers}), allowed, ask, denied, extra
 
 for d in (CONF, STATE.parent, WORKDIR, ATTACH):
