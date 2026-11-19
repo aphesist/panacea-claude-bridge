@@ -155,7 +155,7 @@ def ask_claude(messages, model):
 
     # Stream the run: every thinking block, remark and tool call goes to
     # live.json so the chat can show what Claude is doing while it works.
-    live = {"busy": True, "steps": [], "started": time.time()}
+    live = {"busy": True, "steps": [], "started": time.time(), "at": last.get("at")}
     write_live(live)
     out, tail = None, []
     errf = tempfile.TemporaryFile(mode="w+")   # a file, not a pipe: a full pipe would stall the run
@@ -179,8 +179,7 @@ def ask_claude(messages, model):
                 out = ev
         proc.wait()
     finally:
-        killer.cancel()
-        write_live({"busy": False, "steps": []})
+        killer.cancel()   # live.json is closed by do_POST, together with the reply
     if out is None:
         if proc.returncode in (-9, 137):
             raise subprocess.TimeoutExpired(cmd, TIMEOUT)
@@ -211,15 +210,23 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(404, {"error": "not found"})
         if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
             return self.reply(401, {"error": "bad token"})
+        at = None
         try:
             n = int(self.headers.get("Content-Length", "0"))
             req = json.loads(self.rfile.read(min(n, 50 * 1024 * 1024)))
+            msgs = req.get("messages") or []
+            at = (msgs[-1] if msgs else {}).get("at")
             with LOCK:
-                answer = ask_claude(req.get("messages") or [], req.get("model", ""))
+                answer = ask_claude(msgs, req.get("model", ""))
         except subprocess.TimeoutExpired:
             answer = "Claude took too long (over 10 minutes) and was stopped."
         except Exception as e:
             answer = f"Claude bridge error: {e}"
+        # The reply also goes to live.json, tagged with the message it answers
+        # ("at", set by the chat). If the chat page was closed meanwhile (you left
+        # it, or answered an approval from the notification), its request died
+        # with it; the chat picks the reply up from here when it opens again.
+        write_live({"busy": False, "steps": [], "last": {"at": at, "answer": answer}})
         self.reply(200, {"object": "chat.completion",
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": answer}}]})

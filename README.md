@@ -53,6 +53,7 @@ island chat ──POST /v1/chat/completions──▶ bridge.py (127.0.0.1:47321)
   - root work goes through `pkexec`, so system-file edits also ask for your password in the island.
 - **While it works:** the chat shows what Claude is doing, step by step (searches, files it reads, commands, its short remarks), with a pulsing Claude logo. An approval request appears right there as a card: what it wants to do, why, the exact command or file, and Allow / Deny. Panacea's notification card fires too for when you're elsewhere; answering either withdraws the other. (Claude Code doesn't expose its thinking in this mode, so that part isn't shown.)
 - **Look:** the Claude logo in the header, and a small orange pixel Claude walking in place on the empty chat.
+- **Leave and come back any time:** the bridge owns the request, not the chat page. Close the island mid-task, or answer an approval from the notification, and when you reopen the chat it's exactly where Claude is: still working, waiting on a card, or with the reply already in.
 - **Long tasks:** the chat script's 90 s limit is raised to 10 minutes, to leave room for approvals.
 
 ### Approval cards
