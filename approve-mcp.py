@@ -20,7 +20,7 @@ import html, json, os, pathlib, subprocess, sys, time, uuid
 CACHE = pathlib.Path.home() / ".cache/panacea-claude"
 APPROVAL = CACHE / "approval.json"     # the pending request, {} when none
 LIVE = CACHE / "live.json"             # bridge.py's progress (for "why")
-ICON = str(pathlib.Path.home() / ".config/panacea-claude/claude-logo.svg")   # white, like the rest of Panacea
+ICON = str(pathlib.Path.home() / ".config/panacea-claude/claude-critter.svg")   # the pixel Claude from the chat
 WAIT = 120                             # seconds the in-chat card waits
 
 

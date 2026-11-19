@@ -14,6 +14,7 @@ say "Bridge + chat patcher"
 install -Dm644 "$HERE/bridge.py" "$HOME/.local/lib/panacea-claude/bridge.py"
 install -Dm644 "$HERE/approve-mcp.py" "$HOME/.local/lib/panacea-claude/approve-mcp.py"
 install -Dm644 "$HERE/assets/claude-logo.svg" "$CFG/panacea-claude/claude-logo.svg"
+install -Dm644 "$HERE/assets/claude-critter.svg" "$CFG/panacea-claude/claude-critter.svg"
 install -Dm755 "$HERE/chat-patch.py" "$CFG/hypr/custom/bin/chat-patch.py"
 for u in "$HERE"/systemd/*; do install -Dm644 "$u" "$CFG/systemd/user/$(basename "$u")"; done
 systemctl --user daemon-reload
