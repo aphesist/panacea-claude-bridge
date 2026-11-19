@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v7"
+VERSION = "v8"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -82,6 +82,11 @@ LIVE_BLOCK = '                // what Claude is doing right now, and its approva
 MASCOT = '        // a little orange pixel Claude, walking in place\n        Item {\n            id: critter\n            anchors.horizontalCenter: parent.horizontalCenter\n            readonly property int px: 6\n            readonly property var body: ["..XXXXXXX..", "..XXXXXXX..", "..XEXXXEX..", "XXXXXXXXXXX",\n                                         "XXXXXXXXXXX", "..XXXXXXX.."]\n            readonly property var legs: [["..X.X.X.X.."], [".X.X.X.X..."]]\n            property int frame: 0\n            property bool blink: false\n            readonly property var rows: body.concat(legs[frame])\n            width: 11 * px; height: rows.length * px + 8\n            Timer { interval: 300; repeat: true; running: critter.visible; onTriggered: critter.frame = 1 - critter.frame }\n            Timer { interval: 3400; repeat: true; running: critter.visible\n                    onTriggered: { critter.blink = true; unblink.restart(); } }\n            Timer { id: unblink; interval: 160; onTriggered: critter.blink = false }\n            Item {\n                id: sprite; width: parent.width; height: critter.rows.length * critter.px\n                SequentialAnimation on y { running: critter.visible; loops: Animation.Infinite\n                    NumberAnimation { from: 4; to: 0; duration: 300; easing.type: Easing.OutQuad }\n                    NumberAnimation { from: 0; to: 4; duration: 300; easing.type: Easing.InQuad } }\n                Repeater {\n                    model: critter.rows.length * 11\n                    delegate: Rectangle {\n                        required property int index\n                        readonly property string ch: critter.rows[Math.floor(index / 11)].charAt(index % 11)\n                        x: (index % 11) * critter.px; y: Math.floor(index / 11) * critter.px\n                        width: critter.px; height: critter.px\n                        visible: ch !== "."\n                        color: ch === "E" && !critter.blink ? "#141414" : "#d97757"\n                    }\n                }\n            }\n        }\n'
 
 REPLACEMENTS = [
+    # Super+C: the message box has focus as soon as the chat opens. The shell
+    # gives focus to the loaded view (again 60 ms after opening); a plain Item
+    # root kept it for itself, a FocusScope passes it on to the input.
+    ("Item {\n    id: view\n", "FocusScope {   " + TAG + "\n    id: view\n"),
+    ("id: input; width: inputScroll.width;", "id: input; focus: true; width: inputScroll.width;"),
     # no "agent event" cards in the chat: Panacea copies every notification
     # mentioning Claude/Codex into the chat tab (Claude desktop's session
     # status updates piled up there and could not be dismissed)
