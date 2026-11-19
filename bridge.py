@@ -18,7 +18,7 @@ Security:
     card in the island (approve-mcp.py); no answer within 30 s = denied.
     Root work goes through pkexec, i.e. Panacea's own password prompt.
 """
-import base64, hashlib, json, mimetypes, os, pathlib, secrets, subprocess, threading
+import base64, hashlib, json, mimetypes, os, pathlib, secrets, subprocess, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = pathlib.Path.home()
@@ -29,6 +29,7 @@ STATE = HOME / ".local/state/panacea-claude/state.json"
 WORKDIR = HOME                                           # same project (memory, CLAUDE.md) as your sessions
 APPROVE = pathlib.Path(__file__).resolve().with_name("approve-mcp.py")
 ATTACH = HOME / ".cache/panacea-claude/attachments"
+LIVE = HOME / ".cache/panacea-claude/live.json"         # progress for the chat (patched ChatView)
 TIMEOUT = 590                                            # chat.py (patched) waits 600 s
 
 SYSTEM = (
@@ -38,7 +39,8 @@ SYSTEM = (
     "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
     "You are the user's system helper for this machine: you can search the web, read files, run commands, "
     "open apps (e.g. `hyprctl dispatch exec <app>` or `xdg-open <file-or-url>`) and edit files. "
-    "Commands and edits show the user an Allow/Deny card; if one is denied, say so and stop. "
+    "Commands and edits show the user an Allow/Deny card: right before each one, say in one short "
+    "sentence what you are about to do and why, so the card can explain it. If one is denied, say so and stop. "
     "For anything that needs root, use `pkexec <command>` (never sudo): it asks for the password in the island. "
     "Your memory and notes are shared with the user's other Claude Code sessions on this machine."
 )
@@ -91,6 +93,37 @@ def text_of(content):
     return "\n\n".join(x for x in out if x)
 
 
+def write_live(obj):
+    tmp = LIVE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False))
+    os.replace(tmp, LIVE)
+
+
+def step_of(block):
+    """A content block from the stream -> a short progress line, or None."""
+    t = block.get("type")
+    if t == "thinking" and block.get("thinking", "").strip():
+        return {"k": "think", "t": block["thinking"].strip()[-600:]}
+    if t == "text" and block.get("text", "").strip():
+        return {"k": "text", "t": block["text"].strip()[:600]}
+    if t == "tool_use":
+        name, inp = block.get("name", ""), block.get("input") or {}
+        if name in ("ToolSearch", "TodoWrite"):      # internal bookkeeping, not worth a line
+            return None
+        label = {
+            "WebSearch": lambda: "Searching the web: " + str(inp.get("query", "")),
+            "WebFetch": lambda: "Reading " + str(inp.get("url", "")),
+            "Read": lambda: "Reading " + str(inp.get("file_path", "")),
+            "Glob": lambda: "Looking for " + str(inp.get("pattern", "")),
+            "Grep": lambda: "Searching files for " + str(inp.get("pattern", "")),
+            "Bash": lambda: str(inp.get("description") or ("Running " + str(inp.get("command", "")))),
+            "Edit": lambda: "Editing " + str(inp.get("file_path", "")),
+            "Write": lambda: "Writing " + str(inp.get("file_path", "")),
+        }.get(name, lambda: "Using " + name)()
+        return {"k": "tool", "t": label[:300]}
+    return None
+
+
 def ask_claude(messages, model):
     last = messages[-1]
     if last.get("role") != "user":
@@ -109,7 +142,7 @@ def ask_claude(messages, model):
         hist = "\n\n".join(f"{m['role']}: {text_of(m.get('content'))}" for m in messages[:-1])
         prompt = f"(Earlier in this chat:)\n{hist}\n\n(New message:)\n{prompt}"
 
-    cmd = [CLAUDE, "-p", "--output-format", "json",
+    cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
            "--append-system-prompt", SYSTEM,
            "--mcp-config", MCP, "--strict-mcp-config",
            "--permission-prompt-tool", "mcp__panacea__approve",
@@ -120,11 +153,40 @@ def ask_claude(messages, model):
         cmd += ["--resume", resume]
     cmd += ["--", prompt]
 
-    r = subprocess.run(cmd, cwd=WORKDIR, capture_output=True, text=True, timeout=TIMEOUT)
+    # Stream the run: every thinking block, remark and tool call goes to
+    # live.json so the chat can show what Claude is doing while it works.
+    live = {"busy": True, "steps": [], "started": time.time()}
+    write_live(live)
+    out, tail = None, []
+    errf = tempfile.TemporaryFile(mode="w+")   # a file, not a pipe: a full pipe would stall the run
+    proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=subprocess.PIPE, stderr=errf, text=True)
+    killer = threading.Timer(TIMEOUT, proc.kill)
+    killer.start()
     try:
-        out = json.loads(r.stdout)
-    except Exception:
-        raise RuntimeError((r.stderr or r.stdout or "no output from claude").strip()[:400])
+        for line in proc.stdout:
+            tail = (tail + [line])[-5:]
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "assistant":
+                for block in (ev.get("message") or {}).get("content") or []:
+                    st = step_of(block)
+                    if st:
+                        live["steps"] = (live["steps"] + [st])[-12:]
+                        write_live(live)
+            elif ev.get("type") == "result":
+                out = ev
+        proc.wait()
+    finally:
+        killer.cancel()
+        write_live({"busy": False, "steps": []})
+    if out is None:
+        if proc.returncode in (-9, 137):
+            raise subprocess.TimeoutExpired(cmd, TIMEOUT)
+        errf.seek(0)
+        err = errf.read()
+        raise RuntimeError((err or "".join(tail) or "no output from claude").strip()[:400])
     if out.get("is_error"):
         raise RuntimeError(str(out.get("result") or out.get("subtype"))[:400])
     reply = out.get("result", "")

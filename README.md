@@ -44,6 +44,8 @@ island chat ──POST /v1/chat/completions──▶ bridge.py (127.0.0.1:47321)
   - without asking: web search, reading web pages, reading files (except secrets: `~/.ssh`, `~/.gnupg`, keyrings, Proton data, the bridge token);
   - with your approval: everything else (running commands, opening apps, editing files). Each request shows Panacea's approval card in the island with Allow / Deny; no answer within 30 s means denied. Claude Code itself lets clearly harmless commands such as `echo` through without asking;
   - root work goes through `pkexec`, so system-file edits also ask for your password in the island.
+- **While it works:** the chat shows what Claude is doing, step by step (searches, files it reads, commands, its short remarks), with a pulsing Claude logo. An approval request appears right there as a card: what it wants to do, why, the exact command or file, and Allow / Deny. Panacea's notification card fires too for when you're elsewhere; answering either withdraws the other. (Claude Code doesn't expose its thinking in this mode, so that part isn't shown.)
+- **Look:** the Claude logo in the header, and a small orange pixel Claude walking in place on the empty chat.
 - **Long tasks:** the chat script's 90 s limit is raised to 10 minutes, to leave room for approvals.
 
 ### What Claude can do from here
@@ -85,3 +87,5 @@ then restore `~/.config/panacea/ChatView.qml.pristine`.
 quotes small parts of its QML in order to find its place. Uses
 [Claude Code](https://claude.com/claude-code) as an external program and is not
 affiliated with Anthropic.
+
+Claude and the Claude logo are trademarks of Anthropic. The logo file (`assets/claude-logo.svg`) comes from [Simple Icons](https://simpleicons.org) (CC0); it's used here only to label the Claude chat.
