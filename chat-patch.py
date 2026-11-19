@@ -123,10 +123,12 @@ def read(p):
 
 
 def write_atomic(p, text):
-    tmp = p + ".patch-tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    # In place, not tmp + rename: Quickshell's file watcher loses a file that is
+    # swapped for a new one, and then never reloads the shell.
+    with open(p, "r+" if os.path.exists(p) else "w", encoding="utf-8") as f:
+        f.seek(0)
         f.write(text)
-    os.replace(tmp, p)
+        f.truncate()
 
 
 CHAT_PY = os.path.expanduser("~/.config/panacea/scripts/chat.py")
