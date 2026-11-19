@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v2"
+VERSION = "v3"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -82,7 +82,19 @@ REPLACEMENTS = [
     # always the API chat, never the web tabs
     ("    property string service: sys.islandChatService\n",
      "    property string service: \"chat\"   " + TAG + "\n"
-     "    Component.onCompleted: sys.islandChatService = \"chat\"\n"),
+     "    Component.onCompleted: {\n"
+     "        sys.islandChatService = \"chat\";\n"
+     "        // coming back from the island file picker (portal-patch in panacea-config):\n"
+     "        // restore the draft and attachments, plus the files just picked\n"
+     "        if (sys.pendingChatAttach && sys.pendingChatAttach.length) {\n"
+     "            view.attachments = sys.pendingChatAttach; sys.pendingChatAttach = [];\n"
+     "        }\n"
+     "        if (sys.chatDraft) { input.text = sys.chatDraft; sys.chatDraft = \"\"; }\n"
+     "    }\n"
+     "    Component.onDestruction: {\n"
+     "        if (sys.chatDraft !== undefined) sys.chatDraft = input.text;\n"
+     "        if (sys.pendingChatAttach !== undefined) sys.pendingChatAttach = view.attachments.slice();\n"
+     "    }\n"),
     # Enter sends, Shift+Enter = new line (Ctrl+Enter still sends)
     ("else if ((event.modifiers & Qt.ControlModifier) && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { view.send(); event.accepted = true; }",
      "else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) { view.send(); event.accepted = true; }"),

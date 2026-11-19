@@ -24,6 +24,7 @@ It also reshapes the chat tab into a single Claude tab:
 | Ctrl+Enter sends | **Enter** sends, Shift+Enter adds a new line |
 | "Add an API address, model and key in the launcher settings" | Nothing to configure |
 | Notifications that mention Claude/Codex pile up as cards in the chat | No notification cards in the chat (they stay in the notification centre) |
+| Your draft and attachments are lost when you leave the chat page | Kept: they come back when you return (and the paperclip's island picker, from panacea-config, adds to them) |
 
 ## How it works
 
