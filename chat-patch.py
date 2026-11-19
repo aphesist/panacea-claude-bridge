@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v14"
+VERSION = "v15"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -95,6 +95,7 @@ EXTRA = {
 }
 
 REPLACEMENTS = [
+    ('    ColumnLayout {\n        anchors.fill: parent\n        spacing: 10\n', "    ColumnLayout {\n        anchors.fill: parent\n        // the island gives a page 20 px below it but 15 px at the sides; the message\n        // box sits 15 px from the bottom too, so its corners run parallel to the island's\n        anchors.bottomMargin: -5\n        spacing: 10\n"),
     # the message box: concentric corners, no outline, line icons
     ('            radius: height / 2\n            color: Qt.rgba(1, 1, 1, 0.07)\n            border.width: 1\n            border.color: input.activeFocus ? Qt.rgba(1, 1, 1, 0.25) : Qt.rgba(1, 1, 1, 0.07)\n', '            // concentric with the island: its corner radius minus the 15 px the content sits inside it.\n            // No outline; focus only lifts the fill a touch.\n            radius: view.boxR\n            color: input.activeFocus ? Qt.rgba(1, 1, 1, 0.075) : Qt.rgba(1, 1, 1, 0.055)\n            Behavior on color { ColorAnimation { duration: 150 } }\n'),
     ('                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: 18\n                    color: attachMouse.containsMouse ? Qt.rgba(1,1,1,0.16) : Qt.rgba(1,1,1,0.07)\n                    Glyph { anchors.centerIn: parent; glyph: String.fromCodePoint(0xF03E2); fontFam: view.sys.fontFam; size: 19; color: view.sys.colFg }\n', '                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: view.boxR - 6\n                    color: attachMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"\n                    Behavior on color { ColorAnimation { duration: 150 } }\n                    PanaceaClaudeIcon { anchors.centerIn: parent; width: 18; height: 18; kind: "attach"\n                                        tint: attachMouse.containsMouse ? view.sys.colFg : view.sys.colMuted }\n'),

@@ -22,6 +22,7 @@ import base64, hashlib, json, mimetypes, os, pathlib, secrets, subprocess, tempf
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = pathlib.Path.home()
+HERE = pathlib.Path(__file__).resolve().parent              # sysprofile.py and approve-mcp.py sit next to this file
 HOST, PORT = "127.0.0.1", 47321
 CLAUDE = str(HOME / ".local/bin/claude")
 CONF = HOME / ".config/panacea-claude"
@@ -34,17 +35,38 @@ CACHE = LIVE.parent                                       # approve-mcp.py leave
 TIMEOUT = 590                                            # chat.py (patched) waits 600 s
 
 SYSTEM = (
-    "You are answering in a small chat panel on the user's Linux desktop "
-    "(the Panacea shell's island, Hyprland on Arch). The panel shows plain text only: "
-    "do not use Markdown headings, tables or bold; short paragraphs and simple '-' lists are fine. "
+    "You are the sysadmin of this computer, answering in a small chat panel on its desktop "
+    "(the Panacea shell's island, Hyprland on Arch). You know the machine (profile below) and look things up "
+    "on it before guessing: check logs (journalctl), configs, package versions and running services, "
+    "and use the web for current docs and known issues. Diagnose first, then fix with the smallest change, "
+    "and say how to undo anything non-trivial. "
+    "The panel shows plain text only: no Markdown headings, tables or bold; short paragraphs and simple '-' lists are fine. "
     "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
-    "You are the user's system helper for this machine: you can search the web, read files, run commands, "
-    "open apps (e.g. `hyprctl dispatch exec <app>` or `xdg-open <file-or-url>`) and edit files. "
-    "Commands and edits show the user an Allow/Deny card: right before each one, say in one short "
+    "You can search the web, read files, run commands, open apps (`hyprctl dispatch exec <app>`, `xdg-open <file-or-url>`) "
+    "and edit files. Commands and edits show the owner an Allow/Deny card: right before each one, say in one short "
     "sentence what you are about to do and why, so the card can explain it. If one is denied, say so and stop. "
     "For anything that needs root, use `pkexec <command>` (never sudo): it asks for the password in the island. "
-    "Your memory and notes are shared with the user's other Claude Code sessions on this machine."
+    "Your memory and notes are shared with the owner's other Claude Code sessions on this machine."
 )
+PROFILE = CACHE / "system-profile.md"       # sysprofile.py: hardware, OS, services + the owner's notes
+PROFILE_MAX_AGE = 6 * 3600
+
+
+def profile():
+    """The machine profile, rebuilt when missing, older than a few hours or after a package change."""
+    try:
+        age = time.time() - PROFILE.stat().st_mtime
+        stale = age > PROFILE_MAX_AGE or os.path.getmtime("/var/log/pacman.log") > PROFILE.stat().st_mtime \
+            or os.path.getmtime(HOME / ".config/panacea-claude/notes.md") > PROFILE.stat().st_mtime
+    except OSError:
+        stale = True
+    if stale:
+        subprocess.run(["python3", "-I", str(HERE / "sysprofile.py"), "--write"],
+                       capture_output=True, timeout=30)
+    try:
+        return PROFILE.read_text()
+    except OSError:
+        return ""
 ALLOWED = ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]
 DENIED = [f"Read({p})" for p in ("~/.ssh/**", "~/.gnupg/**", "~/.local/share/keyrings/**",
                                  "~/.config/panacea-claude/**", "~/.config/proton*/**",
@@ -159,7 +181,7 @@ def ask_claude(messages, model):
         prompt = f"(Earlier in this chat:)\n{hist}\n\n(New message:)\n{prompt}"
 
     cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
-           "--append-system-prompt", SYSTEM,
+           "--append-system-prompt", SYSTEM + "\n\n" + profile(),
            "--mcp-config", MCP, "--strict-mcp-config",
            "--permission-prompt-tool", "mcp__panacea__approve",
            "--allowedTools", *ALLOWED, "--disallowedTools", *DENIED]
@@ -258,4 +280,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    threading.Thread(target=profile, daemon=True).start()   # fresh machine profile at startup
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
