@@ -156,9 +156,13 @@ def run_config():
     if cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists() and own_zen_has_claudezilla():
         extra = BROWSER_BLOCKED          # sandbox broken: no browser at all until it's fixed
     elif cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists():
-        servers["claudezilla"] = {"command": "/usr/bin/node", "args": [str(CLAUDEZILLA), "--tools", "all"]}
+        # one agent for every message (its tabs stay open and usable between replies);
+        # needs claude-zen-sandbox's patched MCP server (CLAUDEZILLA_AGENT_ID / _KEEP_TABS)
+        env = {"CLAUDEZILLA_AGENT_ID": "agent_panacea_island", "CLAUDEZILLA_KEEP_TABS": "1",
+               "CLAUDEZILLA_AGENT_TIMEOUT_MS": "0"}
+        servers["claudezilla"] = {"command": "/usr/bin/node", "args": [str(CLAUDEZILLA), "--tools", "all"], "env": env}
         if cfg.get("claudeBrowserAutostart", True):      # Claude's Zen starts on its first browser call
-            servers["claudezilla"]["env"] = {
+            env |= {
                 "CLAUDEZILLA_AUTOSTART_CMD": json.dumps(["systemctl", "--user", "start", "zen-claude.service"]),
                 "CLAUDEZILLA_AUTOSTART_WAIT_MS": "60000"}
         mode = cfg.get("claudeBrowserAsk", "actions")      # actions | all | none
