@@ -20,6 +20,7 @@ import html, json, os, pathlib, subprocess, sys, time, uuid
 CACHE = pathlib.Path.home() / ".cache/panacea-claude"
 APPROVAL = CACHE / "approval.json"     # the pending request, {} when none
 LIVE = CACHE / "live.json"             # bridge.py's progress (for "why")
+ICON = str(pathlib.Path.home() / ".config/panacea-claude/claude-logo.svg")   # white, like the rest of Panacea
 WAIT = 120                             # seconds the in-chat card waits
 
 
@@ -96,7 +97,7 @@ def ask(tool, inp):
     note = None
     try:   # -p prints the notification id first, then the chosen action when answered
         note = subprocess.Popen(
-            ["notify-send", "-p", "--app-name", "Panacea Claude", "--icon", "dialog-question",
+            ["notify-send", "-p", "--app-name", "Panacea Claude", "--icon", ICON,
              "--urgency", "normal", "--expire-time", "30000",
              "--action=panacea-allow=Allow", "--action=panacea-deny=Deny",
              "Claude: " + title.lower(), html.escape(clip((why + "\n" if why else "") + str(body), 400))],
