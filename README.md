@@ -23,6 +23,7 @@ It also reshapes the chat tab into a single Claude tab:
 | Island / Gemini / ChatGPT / DeepSeek tabs (web views) | One tab: **✦ Claude**, model pills **Opus · Sonnet · Haiku**, a new-chat button |
 | Ctrl+Enter sends | **Enter** sends, Shift+Enter adds a new line |
 | "Add an API address, model and key in the launcher settings" | Nothing to configure |
+| Notifications that mention Claude/Codex pile up as cards in the chat | No notification cards in the chat (they stay in the notification centre) |
 
 ## How it works
 

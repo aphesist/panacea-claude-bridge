@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v1"
+VERSION = "v2"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -74,6 +74,11 @@ ROW_END = '''        Item {
             visible: view.service !== "chat"'''
 
 REPLACEMENTS = [
+    # no "agent event" cards in the chat: Panacea copies every notification
+    # mentioning Claude/Codex into the chat tab (Claude desktop's session
+    # status updates piled up there and could not be dismissed)
+    ("    readonly property var visibleEvents: sys.islandAgentEvents.filter(e =>\n",
+     "    readonly property var visibleEvents: [].filter(e =>   " + TAG + "\n"),
     # always the API chat, never the web tabs
     ("    property string service: sys.islandChatService\n",
      "    property string service: \"chat\"   " + TAG + "\n"
