@@ -14,11 +14,13 @@ say "Bridge + chat patcher"
 install -Dm644 "$HERE/bridge.py" "$HOME/.local/lib/panacea-claude/bridge.py"
 install -Dm644 "$HERE/approve-mcp.py" "$HOME/.local/lib/panacea-claude/approve-mcp.py"
 install -Dm644 "$HERE/sysprofile.py" "$HOME/.local/lib/panacea-claude/sysprofile.py"
+install -Dm644 "$HERE/ctl.py" "$HOME/.local/lib/panacea-claude/ctl.py"
 # your own notes for Claude (house rules, layout): kept if you already have them
 [ -e "$CFG/panacea-claude/notes.md" ] || install -Dm600 "$HERE/notes.example.md" "$CFG/panacea-claude/notes.md"
 install -Dm644 "$HERE/assets/claude-logo.svg" "$CFG/panacea-claude/claude-logo.svg"
 install -Dm644 "$HERE/assets/claude-critter.svg" "$CFG/panacea-claude/claude-critter.svg"
 install -Dm755 "$HERE/chat-patch.py" "$CFG/hypr/custom/bin/chat-patch.py"
+mkdir -p "$HOME/.local/state/panacea-claude"   # bridge session + the saved conversation (chat.json)
 for u in "$HERE"/systemd/*; do install -Dm644 "$u" "$CFG/systemd/user/$(basename "$u")"; done
 systemctl --user daemon-reload
 systemctl --user enable --now panacea-claude.service panacea-chat-patch.path

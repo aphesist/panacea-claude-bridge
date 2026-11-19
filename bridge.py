@@ -18,7 +18,7 @@ Security:
     card in the island (approve-mcp.py); no answer within 30 s = denied.
     Root work goes through pkexec, i.e. Panacea's own password prompt.
 """
-import base64, hashlib, json, mimetypes, os, pathlib, secrets, subprocess, tempfile, threading, time
+import base64, hashlib, json, mimetypes, os, pathlib, secrets, signal, subprocess, tempfile, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = pathlib.Path.home()
@@ -43,8 +43,10 @@ SYSTEM = (
     "The panel shows plain text only: no Markdown headings, tables or bold; short paragraphs and simple '-' lists are fine. "
     "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
     "You can search the web, read files, run commands, open apps (`hyprctl dispatch exec <app>`, `xdg-open <file-or-url>`) "
-    "and edit files. Commands and edits show the owner an Allow/Deny card: right before each one, say in one short "
-    "sentence what you are about to do and why, so the card can explain it. If one is denied, say so and stop. "
+    "and edit files. You run in auto mode: most actions just run; destructive ones (deleting trees, root, disks, "
+    "force pushes, removing packages, power) show the owner an Allow/Deny card, and a safety check may block risky "
+    "actions they didn't ask for. Before each action, say in one short sentence what you are about to do and why, "
+    "so a card can explain it. If one is denied or blocked, say so and stop; don't look for a way around it. "
     "For anything that needs root, use `pkexec <command>` (never sudo): it asks for the password in the island. "
     "Your memory and notes are shared with the owner's other Claude Code sessions on this machine."
 )
@@ -71,6 +73,22 @@ ALLOWED = ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]
 DENIED = [f"Read({p})" for p in ("~/.ssh/**", "~/.gnupg/**", "~/.local/share/keyrings/**",
                                  "~/.config/panacea-claude/**", "~/.config/proton*/**",
                                  "~/.local/share/proton*/**", "~/.local/share/panacea/vault*")]
+# Auto mode, like the CLI's: a classifier lets through what you asked for and blocks
+# risky things you didn't (Claude is told why and carries on). These always ask
+# anyway, with the island's Allow/Deny card: deleting trees, root, disks, history
+# rewrites, removing packages, ending the session or powering off.
+ASK = [f"Bash({c})" for c in (
+    "rm -rf *", "rm -fr *", "rm -r *", "rm -R *", "find * -delete*", "shred *",
+    "sudo *", "pkexec *", "su *", "doas *", "run0 *",
+    "dd *", "mkfs*", "wipefs *", "fdisk *", "parted *", "sgdisk *", "cryptsetup *", "mount *", "umount *",
+    "git push --force*", "git push -f*", "git push * --force*", "git reset --hard*", "git clean -f*",
+    "git branch -D *", "git checkout -- *", "git restore *",
+    "pacman -R*", "yay -R*", "paru -R*", "flatpak uninstall*",
+    "systemctl disable*", "systemctl mask*", "systemctl --user disable*", "systemctl --user mask*",
+    "reboot*", "poweroff*", "shutdown*", "halt*", "systemctl reboot*", "systemctl poweroff*",
+    "systemctl suspend*", "systemctl hibernate*", "loginctl terminate*", "hyprctl dispatch exit*",
+    "killall *", "pkill *", "kill -9 *", "chmod -R *", "chown -R *", "crontab -r*")]
+SETTINGS = json.dumps({"permissions": {"ask": ASK}})
 MCP = json.dumps({"mcpServers": {"panacea": {"command": "python3", "args": ["-I", str(APPROVE)]}}})
 
 for d in (CONF, STATE.parent, WORKDIR, ATTACH):
@@ -83,6 +101,60 @@ TOKEN = TOKEN_FILE.read_text().strip()
 LOCK = threading.Lock()
 CARDS = []   # this run's answered approvals with their outcome (done / failed / denied)
 STEPS = []   # this run's timeline (text, tool and card steps, in order)
+RUN = {"proc": None, "stopped": False}   # the run in progress, so the chat can stop it
+COMMANDS = CACHE / "commands.json"      # Claude Code's slash commands, for the chat's / picker
+
+
+def refresh_commands():
+    """Ask Claude Code (SDK control protocol, no model call) for its slash commands."""
+    try:
+        p = subprocess.Popen([CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                              "--verbose"], cwd=WORKDIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True)
+        timer = threading.Timer(30, p.kill)
+        timer.start()
+        p.stdin.write(json.dumps({"type": "control_request", "request_id": "cmds",
+                                  "request": {"subtype": "initialize"}}) + "\n")
+        p.stdin.flush()
+        for line in p.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "control_response":
+                cmds = ((ev.get("response") or {}).get("response") or {}).get("commands") or []
+                out = [{"name": c.get("name", ""), "description": c.get("description", ""),
+                        "argumentHint": c.get("argumentHint", "")} for c in cmds if c.get("name")
+                       and not c["name"].startswith("__")]
+                tmp = COMMANDS.with_suffix(".tmp")
+                tmp.write_text(json.dumps(out, ensure_ascii=False))
+                os.replace(tmp, COMMANDS)
+                break
+        timer.cancel()
+        p.kill()
+    except Exception:
+        pass
+
+
+def commands_loop():
+    while True:
+        refresh_commands()
+        time.sleep(6 * 3600)
+
+
+def interrupt():
+    """Stop the current run (like Esc in the CLI). The session is kept: the next message resumes it."""
+    proc = RUN["proc"]
+    if not proc or proc.poll() is not None:
+        return False
+    RUN["stopped"] = True
+    proc.send_signal(signal.SIGINT)
+    threading.Timer(4, lambda: proc.poll() is None and proc.kill()).start()
+    try:                                   # a card that was waiting goes away with the run
+        (CACHE / "approval.json").write_text("{}")
+    except OSError:
+        pass
+    return True
 
 
 def load_state():
@@ -177,13 +249,14 @@ def ask_claude(messages, model):
     resume = None
     if prev and prev.get("role") == "assistant" and st.get("last_reply") == text_of(prev.get("content")):
         resume = st.get("session_id")
-    elif len(messages) > 1:
+    elif len(messages) > 1 and not prompt.lstrip().startswith("/"):   # a /command goes as it is
         hist = "\n\n".join(f"{m['role']}: {text_of(m.get('content'))}" for m in messages[:-1])
         prompt = f"(Earlier in this chat:)\n{hist}\n\n(New message:)\n{prompt}"
 
     cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
            "--append-system-prompt", SYSTEM + "\n\n" + profile(),
            "--mcp-config", MCP, "--strict-mcp-config",
+           "--permission-mode", "auto", "--settings", SETTINGS,
            "--permission-prompt-tool", "mcp__panacea__approve",
            "--allowedTools", *ALLOWED, "--disallowedTools", *DENIED]
     if model and model not in ("claude", "default"):
@@ -201,6 +274,8 @@ def ask_claude(messages, model):
     out, tail = None, []
     errf = tempfile.TemporaryFile(mode="w+")   # a file, not a pipe: a full pipe would stall the run
     proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=subprocess.PIPE, stderr=errf, text=True)
+    RUN["proc"], RUN["stopped"] = proc, False
+    sid = resume
     killer = threading.Timer(TIMEOUT, proc.kill)
     killer.start()
     try:
@@ -210,7 +285,9 @@ def ask_claude(messages, model):
                 ev = json.loads(line)
             except ValueError:
                 continue
-            if ev.get("type") == "assistant":
+            if ev.get("type") == "system" and ev.get("subtype") == "init":
+                sid = ev.get("session_id") or sid
+            elif ev.get("type") == "assistant":
                 for block in (ev.get("message") or {}).get("content") or []:
                     st = step_of(block)
                     if st:
@@ -239,6 +316,13 @@ def ask_claude(messages, model):
         proc.wait()
     finally:
         killer.cancel()   # live.json is closed by do_POST, together with the reply
+        RUN["proc"] = None
+    if RUN["stopped"]:
+        # stopped from the chat: keep the session so the next message carries on from here
+        reply = "Stopped."
+        if sid:
+            save_state({"session_id": sid, "last_reply": reply})
+        return reply
     if out is None:
         if proc.returncode in (-9, 137):
             raise subprocess.TimeoutExpired(cmd, TIMEOUT)
@@ -265,6 +349,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path.rstrip("/") == "/v1/interrupt":
+            if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
+                return self.reply(401, {"error": "bad token"})
+            return self.reply(200, {"stopped": interrupt()})
         if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
             return self.reply(404, {"error": "not found"})
         if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
@@ -300,4 +388,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=profile, daemon=True).start()   # fresh machine profile at startup
+    threading.Thread(target=commands_loop, daemon=True).start()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

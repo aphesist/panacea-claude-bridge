@@ -30,11 +30,14 @@ It also reshapes the chat tab into a single Claude tab:
 | Ctrl+Enter sends | **Enter** sends, Shift+Enter adds a new line, **Ctrl+N** starts a new chat |
 | A generic ✦ and "Add an API address, model and key in the launcher settings" | A small orange pixel Claude that walks and blinks, and nothing to configure |
 | "Думаю…" while it works | One **timeline** of live steps (searches, files read, commands, its remarks), with approval cards **in place of the step they're for** |
-| Every action needs an answer | **Safe auto mode**: read-only commands (`ls`, `df`, `systemctl status`, `git log`, `pacman -Q`…) just run; anything that writes, deletes, installs or touches secrets still asks |
+| Every action needs an answer | **Auto mode, like the CLI's**: most actions just run; a safety classifier blocks risky things you didn't ask for, and only destructive ones (deleting folders, root, disks, force pushes, removing packages, power) show an Allow / Deny card |
+| You can't type while Claude works | Messages typed meanwhile **queue** and go out together when it finishes; **Send now** stops the run (the session is kept) and sends right away; with nothing typed, the send button is a **stop** button |
+| No commands | **/ commands** with a compact picker: `/clear`, `/model`, `/stop`, and Claude Code's `/compact`, `/context`, `/usage`, `/recap`, `/deep-research` |
 | A plain row of model names | Opus · Sonnet · Haiku with a selector that **slides** behind the names |
 | Your messages and the reply blur together | Claude's replies carry its logo; each approval leaves a record in the conversation: **✓ Done**, **! Failed** or **× Denied**, with the exact command |
 | Opening the chat leaves the message box unfocused | `Super+C` opens it with the cursor in the message box |
 | Notifications that mention Claude/Codex pile up as cards in the chat | No notification cards in the chat (they stay in the notification centre) |
+| Restarting the shell (or Claude editing and restarting it) wipes the chat, and the next message starts a new Claude session | The conversation is **kept across shell restarts** and Claude carries on in the same session, plan and all. Only **New chat** clears it |
 | Your draft and attachments are lost when you leave the chat page | Kept: they come back when you return (and the paperclip's island picker, from panacea-config, adds to them) |
 
 ## How it works
@@ -52,8 +55,8 @@ island chat ──POST /v1/chat/completions──▶ bridge.py (127.0.0.1:47321)
 - **Shared context:** Claude runs from your home folder, so it shares Claude Code's memory and `CLAUDE.md` with your other sessions there, and its sessions show up in Claude Code and the desktop app under that project.
 - **What it may do:**
   - without asking: web search, reading web pages, reading files (except secrets: `~/.ssh`, `~/.gnupg`, keyrings, Proton data, the bridge token);
-  - read-only commands, without asking (**safe auto mode**): a fixed list of programs that only look (`ls`, `cat`, `df`, `free`, `ps`, `ip`, `journalctl`, `systemctl status`, `git status/log/diff`, `pacman -Q`…), checked per subcommand, with no output redirection and no paths to secrets. Anything not on the list asks;
-  - with your approval: everything else (running other commands, opening apps, editing files). Each request shows an approval card in the chat (and Panacea's notification card) with Allow / Deny; no answer means denied;
+  - most things, without asking: Claude Code's **auto mode** (`--permission-mode auto`). Its classifier lets through what you asked for and blocks risky actions you didn't; a blocked action goes back to Claude with the reason, and it stops and tells you;
+  - with your approval, always: a fixed list of destructive commands (`ask` rules in `bridge.py`): `rm -r`, `sudo`/`pkexec`, `dd`/`mkfs`/partitioning, force pushes and hard resets, removing packages, disabling services, killing processes, reboot/power-off. Each shows an approval card in the chat (and Panacea's notification card) with Allow / Deny; no answer means denied;
   - root work goes through `pkexec`, so system-file edits also ask for your password in the island.
 - **While it works:** the chat shows one timeline of what Claude is doing (searches, files it reads, commands, its short remarks), in order, with the pixel Claude and its status at the bottom. An approval request takes the place of its step as a card: what it wants to do, why, the exact command or file, and Allow / Deny. Once answered it collapses in place into that step's record (*Allowed · running*, then **✓ Done**), without flicker, and Claude's next remarks continue below it. Panacea's island glows orange along its edge while Claude works. Panacea's notification card fires too for when you're elsewhere; answering either withdraws the other. (Claude Code doesn't expose its thinking in this mode, so that part isn't shown.)
 - **Look:** the Claude logo in the header, and a small orange pixel Claude walking in place on the empty chat.

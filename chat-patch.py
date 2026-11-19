@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v23"
+VERSION = "v30"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -99,7 +99,7 @@ ROW_END = '''        Item {
             Layout.fillWidth: true; Layout.fillHeight: true
             visible: view.service !== "chat"'''
 
-LIVE_PROPS = '    property bool busy: false\n    // One radius system, taken from the island\'s corner so the curves echo it:\n    // surfaces (message box, cards, bubbles) boxR, controls inside them rInner,\n    // small controls (model switcher, new chat) fully round.\n    readonly property real islandR: sys.cfg.islandRadius > 0 ? sys.cfg.islandRadius : 26\n    readonly property real boxR: Math.max(14, islandR - 6)\n    readonly property real rInner: Math.max(8, boxR - 6)\n    // what the pixel Claude above the steps is doing: a card is up, a tool runs, or it thinks\n    readonly property string statusMood: (approval && approval.id) ? "waiting" : answered.tuid !== undefined ? "working"\n        : ((live.steps || []).length && live.steps[live.steps.length - 1].k === "tool") ? "working" : "thinking"\n    // The chat page is rebuilt whenever you come back to it (and when an approval\n    // is answered from the notification, which swaps the page out), and its\n    // request dies with the old page. The bridge keeps working regardless and\n    // records the reply in live.json, so a page only needs to catch up:\n    // still working -> show it; finished -> take the reply that answers our message.\n    property bool ownReq: false          // our own request is still out\n    property string fallbackAnswer: ""   // chat.py\'s answer, used if the bridge left no record\n    function awaiting() { var m = view.sys.islandChatMessages; return m.length > 0 && m[m.length - 1].role === "user"; }\n    function finish(answer, cards, timeline) {\n        if (view.awaiting()) { var a = view.sys.islandChatMessages.slice(); a.push({ role: "assistant", content: answer, cards: cards || [], timeline: timeline || [] }); view.sys.islandChatMessages = a; }\n        view.busy = false; view.fallbackAnswer = "";\n    }\n    function sync() {\n        var l = view.live || {}, m = view.sys.islandChatMessages;\n        if (!view.awaiting()) { if (!l.busy && !view.ownReq) view.busy = false; return; }\n        var at = m[m.length - 1].at;\n        if (l.busy) { if (!view.ownReq && (!at || l.at === at || l.at === undefined)) view.busy = true; return; }\n        if (l.last && at && l.last.at === at) { view.finish(l.last.answer || "Couldn\'t get a reply.", l.last.cards, l.last.timeline); return; }\n        if (view.ownReq) return;                       // not recorded yet: our request is still coming\n        if (view.fallbackAnswer) view.finish(view.fallbackAnswer, []);\n        else if (view.busy) view.finish("Couldn\'t get a reply.", []);\n    }\n\n    // live progress + in-chat approval cards, written by bridge.py / approve-mcp.py\n    readonly property string pcDir: Quickshell.env("HOME") + "/.cache/panacea-claude/"\n    readonly property string pcLogo: "file://" + Quickshell.env("HOME") + "/.config/panacea-claude/claude-logo.svg"\n    property var live: ({ busy: false, steps: [] })\n    property var approval: ({})\n    // polled while busy; only a real change touches the view (re-setting the same state\n    // every 350 ms rebuilt the steps and made them blink)\n    property string liveText: ""\n    property string approvalText: ""\n    FileView { id: liveFile; path: view.pcDir + "live.json"; printErrors: false\n        onLoaded: { var t = text(); if (t !== view.liveText) { try { view.live = JSON.parse(t); view.liveText = t; } catch (e) { return; } } view.sync(); } }\n    FileView { id: approvalFile; path: view.pcDir + "approval.json"; printErrors: false\n        onLoaded: { var t = text(); if (t === view.approvalText) return; view.approvalText = t\n                    try { view.approval = JSON.parse(t) || ({}); } catch (e) { view.approval = ({}); } } }\n    // One timeline, in order: Claude\'s remarks, what it runs, its approval cards. A card sits\n    // where its tool step is, stays put once answered ("Allowed - running") and turns into\n    // its outcome in place. Kept in a ListModel updated item by item, so nothing redraws\n    // that didn\'t change.\n    property var answered: ({})      // the card you just answered, until its outcome arrives\n    ListModel { id: timelineModel }\n    function stepRow(o) {\n        return { k: String(o.k || ""), t: String(o.t || ""), title: String(o.title || ""), body: String(o.body || ""),\n                 why: String(o.why || ""), decision: String(o.decision || ""), ok: !!o.ok, answered: String(o.answered || "") };\n    }\n    function buildTimeline() {\n        var steps = view.live.steps || [], ap = view.approval || {}, an = view.answered || {};\n        var out = [], apPlaced = false, anPlaced = false;\n        for (var i = 0; i < steps.length; i++) {\n            var st = steps[i];\n            if (st.k === "think") continue;\n            if (st.k === "tool" && ap.id && ap.tuid && st.id === ap.tuid) { out.push(view.stepRow({ k: "ask", title: ap.title, body: ap.body, why: ap.why })); apPlaced = true; continue; }\n            if (st.k === "tool" && an.tuid && st.id === an.tuid) { out.push(view.stepRow({ k: "ask", title: an.title, body: an.body, why: an.why, answered: an.choice })); anPlaced = true; continue; }\n            if (st.k === "card" && an.tuid && st.id === an.tuid) anPlaced = true;\n            out.push(view.stepRow(st));\n        }\n        if (an.choice && !anPlaced) out.push(view.stepRow({ k: "ask", title: an.title, body: an.body, why: an.why, answered: an.choice }));\n        if (ap.id && !apPlaced) out.push(view.stepRow({ k: "ask", title: ap.title, body: ap.body, why: ap.why }));\n        for (var j = 0; j < out.length; j++) {\n            if (j < timelineModel.count) {\n                var cur = timelineModel.get(j);\n                for (var key in out[j]) if (cur[key] !== out[j][key]) timelineModel.setProperty(j, key, out[j][key]);\n            } else timelineModel.append(out[j]);\n        }\n        while (timelineModel.count > out.length) timelineModel.remove(timelineModel.count - 1);\n        // its outcome is in: the answered card has done its job\n        if (an.choice && steps.some(function (x) { return x.k === "card" && x.id === an.tuid; })) view.answered = ({});\n    }\n    onLiveChanged: buildTimeline()\n    onApprovalChanged: buildTimeline()\n    onAnsweredChanged: buildTimeline()\n    Timer { running: true; interval: 1; onTriggered: { liveFile.reload(); approvalFile.reload(); } }   // catch up on open\n    Timer { interval: 350; repeat: true; running: view.busy; triggeredOnStart: true\n        onTriggered: { liveFile.reload(); approvalFile.reload(); } }\n    onBusyChanged: if (!busy) { view.answered = ({}); view.live = ({ busy: false, steps: [] }); view.approval = ({}); view.liveText = ""; view.approvalText = ""; }\n    Process { id: answerProc }\n    function answerApproval(choice) {\n        if (!view.approval || !view.approval.id) return;\n        answerProc.command = ["python3", "-I", Quickshell.env("HOME") + "/.local/lib/panacea-claude/approve-mcp.py",\n                              "--answer", String(view.approval.id), choice];\n        answerProc.running = true;\n        view.answered = { tuid: String(view.approval.tuid || ""), title: view.approval.title, body: view.approval.body,\n                          why: view.approval.why, choice: choice };\n        view.approval = ({});\n    }\n'
+LIVE_PROPS = '    property bool busy: false\n    // The conversation outlives the shell: saved on every change, put back when the page\n    // starts empty (after a shell restart). Only New chat clears it. The bridge resumes\n    // its Claude session because the restored last reply is exactly the one it gave.\n    FileView { id: chatStore; path: Quickshell.env("HOME") + "/.local/state/panacea-claude/chat.json"\n               blockLoading: true; printErrors: false }\n    property bool restoring: false\n    function restoreChat() {\n        if (view.sys.islandChatMessages.length) return;\n        try { var a = JSON.parse(chatStore.text()); if (Array.isArray(a) && a.length) { view.restoring = true; view.sys.islandChatMessages = a; view.restoring = false; } } catch (e) {}\n    }\n    Connections { target: view.sys\n        function onIslandChatMessagesChanged() { if (!view.restoring) chatStore.setText(JSON.stringify(view.sys.islandChatMessages)); } }\n    // One radius system, taken from the island\'s corner so the curves echo it:\n    // surfaces (message box, cards, bubbles) boxR, controls inside them rInner,\n    // small controls (model switcher, new chat) fully round.\n    readonly property real islandR: sys.cfg.islandRadius > 0 ? sys.cfg.islandRadius : 26\n    readonly property real boxR: Math.max(14, islandR - 6)\n    readonly property real rInner: Math.max(8, boxR - 6)\n    // what the pixel Claude above the steps is doing: a card is up, a tool runs, or it thinks\n    readonly property string statusMood: (approval && approval.id) ? "waiting" : answered.tuid !== undefined ? "working"\n        : ((live.steps || []).length && live.steps[live.steps.length - 1].k === "tool") ? "working" : "thinking"\n    // The chat page is rebuilt whenever you come back to it (and when an approval\n    // is answered from the notification, which swaps the page out), and its\n    // request dies with the old page. The bridge keeps working regardless and\n    // records the reply in live.json, so a page only needs to catch up:\n    // still working -> show it; finished -> take the reply that answers our message.\n    property bool ownReq: false          // our own request is still out\n    property string fallbackAnswer: ""   // chat.py\'s answer, used if the bridge left no record\n    function awaiting() { var m = view.sys.islandChatMessages; return m.length > 0 && m[m.length - 1].role === "user"; }\n    function finish(answer, cards, timeline) {\n        if (view.awaiting()) { var a = view.sys.islandChatMessages.slice(); a.push({ role: "assistant", content: answer, cards: cards || [], timeline: timeline || [] }); view.sys.islandChatMessages = a; }\n        view.busy = false; view.fallbackAnswer = "";\n    }\n    function sync() {\n        var l = view.live || {}, m = view.sys.islandChatMessages;\n        if (!view.awaiting()) { if (!l.busy && !view.ownReq) view.busy = false; return; }\n        var at = m[m.length - 1].at;\n        if (l.busy) { if (!view.ownReq && (!at || l.at === at || l.at === undefined)) view.busy = true; return; }\n        if (l.last && at && l.last.at === at) { view.finish(l.last.answer || "Couldn\'t get a reply.", l.last.cards, l.last.timeline); return; }\n        if (view.ownReq) return;                       // not recorded yet: our request is still coming\n        if (view.fallbackAnswer) view.finish(view.fallbackAnswer, []);\n        else if (view.busy) view.finish("Couldn\'t get a reply.", []);\n    }\n\n    // live progress + in-chat approval cards, written by bridge.py / approve-mcp.py\n    readonly property string pcDir: Quickshell.env("HOME") + "/.cache/panacea-claude/"\n    readonly property string pcLogo: "file://" + Quickshell.env("HOME") + "/.config/panacea-claude/claude-logo.svg"\n    property var live: ({ busy: false, steps: [] })\n    property var approval: ({})\n    // polled while busy; only a real change touches the view (re-setting the same state\n    // every 350 ms rebuilt the steps and made them blink)\n    property string liveText: ""\n    property string approvalText: ""\n    FileView { id: liveFile; path: view.pcDir + "live.json"; printErrors: false\n        onLoaded: { var t = text(); if (t !== view.liveText) { try { view.live = JSON.parse(t); view.liveText = t; } catch (e) { return; } } view.sync(); } }\n    FileView { id: approvalFile; path: view.pcDir + "approval.json"; printErrors: false\n        onLoaded: { var t = text(); if (t === view.approvalText) return; view.approvalText = t\n                    try { view.approval = JSON.parse(t) || ({}); } catch (e) { view.approval = ({}); } } }\n    // One timeline, in order: Claude\'s remarks, what it runs, its approval cards. A card sits\n    // where its tool step is, stays put once answered ("Allowed - running") and turns into\n    // its outcome in place. Kept in a ListModel updated item by item, so nothing redraws\n    // that didn\'t change.\n    property var answered: ({})      // the card you just answered, until its outcome arrives\n    ListModel { id: timelineModel }\n    function stepRow(o) {\n        return { k: String(o.k || ""), t: String(o.t || ""), title: String(o.title || ""), body: String(o.body || ""),\n                 why: String(o.why || ""), decision: String(o.decision || ""), ok: !!o.ok, answered: String(o.answered || "") };\n    }\n    function buildTimeline() {\n        var steps = view.live.steps || [], ap = view.approval || {}, an = view.answered || {};\n        var out = [], apPlaced = false, anPlaced = false;\n        for (var i = 0; i < steps.length; i++) {\n            var st = steps[i];\n            if (st.k === "think") continue;\n            if (st.k === "tool" && ap.id && ap.tuid && st.id === ap.tuid) { out.push(view.stepRow({ k: "ask", title: ap.title, body: ap.body, why: ap.why })); apPlaced = true; continue; }\n            if (st.k === "tool" && an.tuid && st.id === an.tuid) { out.push(view.stepRow({ k: "ask", title: an.title, body: an.body, why: an.why, answered: an.choice })); anPlaced = true; continue; }\n            if (st.k === "card" && an.tuid && st.id === an.tuid) anPlaced = true;\n            out.push(view.stepRow(st));\n        }\n        if (an.choice && !anPlaced) out.push(view.stepRow({ k: "ask", title: an.title, body: an.body, why: an.why, answered: an.choice }));\n        if (ap.id && !apPlaced) out.push(view.stepRow({ k: "ask", title: ap.title, body: ap.body, why: ap.why }));\n        for (var j = 0; j < out.length; j++) {\n            if (j < timelineModel.count) {\n                var cur = timelineModel.get(j);\n                for (var key in out[j]) if (cur[key] !== out[j][key]) timelineModel.setProperty(j, key, out[j][key]);\n            } else timelineModel.append(out[j]);\n        }\n        while (timelineModel.count > out.length) timelineModel.remove(timelineModel.count - 1);\n        // its outcome is in: the answered card has done its job\n        if (an.choice && steps.some(function (x) { return x.k === "card" && x.id === an.tuid; })) view.answered = ({});\n    }\n    onLiveChanged: buildTimeline()\n    onApprovalChanged: buildTimeline()\n    onAnsweredChanged: buildTimeline()\n    Timer { running: true; interval: 1; onTriggered: { liveFile.reload(); approvalFile.reload(); } }   // catch up on open\n    Timer { interval: 350; repeat: true; running: view.busy; triggeredOnStart: true\n        onTriggered: { liveFile.reload(); approvalFile.reload(); } }\n    onBusyChanged: if (!busy) { view.answered = ({}); view.live = ({ busy: false, steps: [] }); view.approval = ({}); view.liveText = ""; view.approvalText = ""; }\n    Process { id: answerProc }\n    function answerApproval(choice) {\n        if (!view.approval || !view.approval.id) return;\n        answerProc.command = ["python3", "-I", Quickshell.env("HOME") + "/.local/lib/panacea-claude/approve-mcp.py",\n                              "--answer", String(view.approval.id), choice];\n        answerProc.running = true;\n        view.answered = { tuid: String(view.approval.tuid || ""), title: view.approval.title, body: view.approval.body,\n                          why: view.approval.why, choice: choice };\n        view.approval = ({});\n    }\n'
 LIVE_BLOCK = '                // what Claude is doing right now: one timeline, then the pixel Claude at the bottom\n                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 10\n                    Repeater {\n                        model: timelineModel\n                        delegate: PanaceaClaudeStep {\n                            required property string k; required property string t; required property string title\n                            required property string body; required property string why; required property string decision\n                            required property bool ok; required property string answered\n                            width: parent.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                            kind: k; text: t; cardTitle: title; cardBody: body; reason: why; outcome: decision; worked: ok; answer: answered\n                            animateIn: true\n                            onChosen: c => view.answerApproval(c)\n                        }\n                    }\n                    Row {\n                        spacing: 10\n                        PanaceaClaudeCritter { px: 2; mood: view.statusMood; anchors.verticalCenter: parent.verticalCenter }\n                        Text { text: ({ thinking: "Thinking", working: "Working", waiting: "Waiting for you" })[view.statusMood]\n                               anchors.verticalCenter: parent.verticalCenter\n                               color: view.sys.colMuted; font { pixelSize: 12; family: view.sys.fontBody } }\n                    }\n                }\n'
 MASCOT = '        // the pixel Claude, idle\n        PanaceaClaudeCritter { anchors.horizontalCenter: parent.horizontalCenter; px: 6; mood: "idle" }\n'
 
@@ -206,6 +206,7 @@ REPLACEMENTS = [
      "    property string service: \"chat\"   " + TAG + "\n"
      "    Component.onCompleted: {\n"
      "        sys.islandChatService = \"chat\";\n"
+     "        view.restoreChat();   // after a shell restart: the conversation, as you left it\n"
      "        // coming back from the island file picker (portal-patch in panacea-config):\n"
      "        // restore the draft and attachments, plus the files just picked\n"
      "        if (sys.pendingChatAttach && sys.pendingChatAttach.length) {\n"
@@ -225,6 +226,195 @@ REPLACEMENTS = [
     ('text: view.sys.tr("Спросите что угодно")', 'text: "Ask Claude anything"'),
     ('text: view.sys.tr("Добавьте адрес API, модель и ключ в настройках лаунчера.")',
      'text: "Enter to send · Shift+Enter for a new line"'),
+]
+
+
+# Second pass, on the patched text: typing while Claude works (queue, or stop it and
+# send now), slash commands with a picker (Claude Code's own, from the bridge's
+# commands.json, plus /clear and /model handled here), and /command replies shown
+# as Markdown (they come back as tables and lists).
+POST = [
+    (r'''    property bool restoring: false
+''', r'''    property bool restoring: false
+    // ---- while Claude works: what you send waits in a queue (sent as one message when it
+    // finishes), or "Send now" stops the run (the session is kept) and sends it right away
+    property var queue: []
+    readonly property string ctl: Quickshell.env("HOME") + "/.local/lib/panacea-claude/ctl.py"
+    Process { id: ctlProc }
+    function interrupt() { if (!view.busy) return; ctlProc.command = ["python3", "-I", view.ctl, "interrupt"]; ctlProc.running = true; }
+    function enqueue(t) { var q = view.queue.slice(); q.push(t); view.queue = q; }
+    function flushQueue() {
+        if (view.busy || !view.queue.length) return;
+        var draft = input.text;
+        input.text = view.queue.join("\n\n"); view.queue = [];
+        view.send();
+        input.text = draft;
+    }
+    Connections { target: view; function onBusyChanged() { if (!view.busy) Qt.callLater(view.flushQueue); } }
+    // ---- slash commands
+    property var commands: []
+    FileView { id: cmdFile; path: view.pcDir + "commands.json"; printErrors: false; watchChanges: true
+        onFileChanged: reload()
+        onLoaded: { try { var c = JSON.parse(text()); if (Array.isArray(c)) view.commands = c; } catch (e) {} } }
+    // only what makes sense in the island, in plain words; Claude Code's own commands
+    // show only if this install has them (commands.json from the bridge)
+    readonly property var palette: [
+        { name: "clear",   description: "Start a new chat",                  argumentHint: "",        local: true },
+        { name: "model",   description: "Switch model",                      argumentHint: "opus · sonnet · haiku", local: true },
+        { name: "stop",    description: "Stop Claude, keep the conversation", argumentHint: "",       local: true },
+        { name: "compact", description: "Summarize the chat to free up room", argumentHint: "" },
+        { name: "context", description: "How full the conversation is",      argumentHint: "" },
+        { name: "usage",   description: "Your plan usage this week",         argumentHint: "" },
+        { name: "recap",   description: "One-line recap of this chat",       argumentHint: "" },
+        { name: "deep-research", description: "Research the web, with sources", argumentHint: "topic" } ]
+    function localCommand(msg) {
+        var m = /^\/(\S+)\s*(.*)$/.exec(msg); if (!m) return false;
+        var name = m[1].toLowerCase(), arg = m[2].trim().toLowerCase();
+        if (name === "clear" || name === "new" || name === "reset") {
+            view.interrupt(); view.queue = []; view.attachments = []; view.sys.islandChatMessages = []; return true;
+        }
+        if (name === "model" && ["opus", "sonnet", "haiku"].indexOf(arg) >= 0) {
+            view.sys.cfg.aiModel = arg; view.sys.saveCfg(); return true;
+        }
+        if (name === "stop") { view.interrupt(); return true; }
+        return false;
+    }
+    property string pickDismissed: ""
+    readonly property string pickQuery: { var m = /^\/(\S*)$/.exec(input.text); return m ? m[1].toLowerCase() : "\u0000"; }
+    readonly property var picks: {
+        if (view.pickQuery === "\u0000" || input.text === view.pickDismissed) return [];
+        var have = view.commands.map(function (c) { return c.name; });
+        var all = view.palette.filter(function (c) { return c.local || have.indexOf(c.name) >= 0; });
+        var q = view.pickQuery;          // the letters typed after "/": names that start with them
+        return all.filter(function (c) { return String(c.name).toLowerCase().indexOf(q) === 0; });
+    }
+    property int pickIndex: 0
+    onPicksChanged: pickIndex = 0
+    readonly property bool pickerShown: picks.length > 0
+    function complete(run) {
+        var c = view.picks[view.pickIndex]; if (!c) return;
+        if (run && !c.argumentHint) { input.text = "/" + c.name; view.send(); return; }
+        input.text = "/" + c.name + " "; input.cursorPosition = input.length;
+    }
+'''),
+    # sending: local commands first; while Claude works, text goes to the queue
+    (r'''        if ((!msg && !attachments.length) || busy) return;
+''', r'''        if (msg.charAt(0) === "/" && view.localCommand(msg)) { input.text = ""; return; }
+        if (busy && msg) { view.enqueue(msg); input.text = ""; return; }
+        if ((!msg && !attachments.length) || busy) return;
+'''),
+    # replies to a /command: Markdown
+    (r'''                        required property var modelData
+                        readonly property bool mine: modelData.role === "user"
+''', r'''                        required property var modelData
+                        required property int index
+                        readonly property bool mine: modelData.role === "user"
+                        readonly property bool cmdReply: !mine && index > 0
+                            && String((view.sys.islandChatMessages[index - 1] || {}).content || "").charAt(0) === "/"
+'''),
+    (r'''                                   textFormat: Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }''',
+     r'''                                   textFormat: msgItem.cmdReply ? Text.MarkdownText : Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }'''),
+    # keys: the picker takes Up/Down/Tab/Esc/Enter while it's open
+    (r'''else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) { view.send(); event.accepted = true; }''',
+     r'''else if (view.pickerShown && (event.key === Qt.Key_Down || event.key === Qt.Key_Up)) { view.pickIndex = (view.pickIndex + (event.key === Qt.Key_Down ? 1 : -1) + view.picks.length) % view.picks.length; event.accepted = true; }
+                                else if (view.pickerShown && event.key === Qt.Key_Tab) { view.complete(false); event.accepted = true; }
+                                else if (view.pickerShown && event.key === Qt.Key_Escape) { view.pickDismissed = input.text; event.accepted = true; }
+                                else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier)) { if (view.pickerShown) view.complete(true); else view.send(); event.accepted = true; }'''),
+    # the command picker and the queue, just above the message box
+    (r'''        Rectangle {
+            Layout.fillWidth: true
+            Layout.leftMargin: -3; Layout.rightMargin: -3   // 12 px from the island, like the bottom
+''', r'''        Rectangle {
+            id: picker
+            Layout.fillWidth: true
+            Layout.leftMargin: -3; Layout.rightMargin: -3
+            visible: view.service === "chat" && view.pickerShown
+            // concentric: rows are 24 px pills (radius 12), inset by the panel's radius minus 12
+            readonly property real inset: Math.max(4, view.boxR - 12)
+            Layout.preferredHeight: Math.min(pickList.contentHeight, 3 * 24) + 2 * inset     // 3 rows, like the CLI; arrows scroll
+            radius: view.boxR
+            color: Qt.tint(view.sys.colBg, Qt.rgba(1, 1, 1, 0.07))      // solid: nothing shows through
+            ListView {
+                id: pickList
+                anchors.fill: parent; anchors.margins: picker.inset; clip: true
+                model: view.picks
+                currentIndex: view.pickIndex
+                highlightMoveDuration: 90; highlightMoveVelocity: -1
+                highlightResizeDuration: 0; highlightResizeVelocity: -1
+                boundsBehavior: Flickable.StopAtBounds
+                highlight: Rectangle { width: pickList.width; height: 24; radius: 12; color: Qt.rgba(1, 1, 1, 0.08) }
+                delegate: Item {
+                    required property var modelData
+                    required property int index
+                    width: pickList.width; height: 24
+                    Text { id: pickName; x: 10; anchors.verticalCenter: parent.verticalCenter
+                           text: "/" + modelData.name; color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 11; bold: true } }
+                    Text { anchors.left: pickName.right; anchors.leftMargin: 10; anchors.right: parent.right; anchors.rightMargin: 10
+                           anchors.verticalCenter: parent.verticalCenter; elide: Text.ElideRight
+                           text: modelData.description + (modelData.argumentHint ? "  ·  " + modelData.argumentHint : "")
+                           color: view.sys.colMuted; font { pixelSize: 11; family: view.sys.fontBody } }
+                    MouseArea {
+                        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                        onEntered: view.pickIndex = index
+                        onClicked: { view.pickIndex = index; view.complete(true); input.forceActiveFocus(); }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.leftMargin: -3; Layout.rightMargin: -3
+            visible: view.service === "chat" && view.queue.length > 0
+            Layout.preferredHeight: 48
+            radius: view.boxR
+            color: Qt.rgba(1, 1, 1, 0.055)
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 7; spacing: 6
+                Column {
+                    Layout.fillWidth: true; spacing: 2
+                    Text { text: view.queue.length === 1 ? "Queued · sends when Claude finishes" : view.queue.length + " queued · sent together when Claude finishes"
+                           color: view.sys.colMuted; font { pixelSize: 11; family: view.sys.fontBody } }
+                    Text { width: parent.width; elide: Text.ElideRight; maximumLineCount: 1; textFormat: Text.PlainText
+                           text: String(view.queue[view.queue.length - 1] || "").replace(/\s*\n\s*/g, " ")
+                           color: view.sys.colFg; font { pixelSize: 12; family: view.sys.fontBody } }
+                }
+                Rectangle {
+                    Layout.preferredWidth: 82; Layout.preferredHeight: 32; radius: view.rInner
+                    color: nowMa.pressed ? Qt.rgba(1, 1, 1, 0.8) : view.sys.colFg
+                    Text { anchors.centerIn: parent; text: "Send now"; color: view.sys.colBg; font { pixelSize: 12; bold: true; family: view.sys.fontBody } }
+                    MouseArea { id: nowMa; anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.interrupt() }
+                }
+                Rectangle {
+                    Layout.preferredWidth: 32; Layout.preferredHeight: 32; radius: view.rInner
+                    color: dropMa.containsMouse ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.06)
+                    Text { anchors.centerIn: parent; text: "×"; color: view.sys.colMuted; font.pixelSize: 16 }
+                    MouseArea { id: dropMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: view.queue = [] }
+                }
+            }
+        }
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.leftMargin: -3; Layout.rightMargin: -3   // 12 px from the island, like the bottom
+'''),
+    # the send button: queues while Claude works; with nothing typed it's a stop button
+    (r'''                    readonly property bool ready: !view.busy && (input.text.trim().length || view.attachments.length) > 0
+''', r'''                    readonly property bool ready: (input.text.trim().length || (!view.busy && view.attachments.length)) > 0
+                    readonly property bool stop: view.busy && !ready
+'''),
+    (r'''                    color: ready ? view.sys.colFg : Qt.rgba(1, 1, 1, 0.06)
+''', r'''                    color: ready ? view.sys.colFg : stop ? (stopMa.containsMouse ? Qt.rgba(1, 1, 1, 0.16) : Qt.rgba(1, 1, 1, 0.1)) : Qt.rgba(1, 1, 1, 0.06)
+'''),
+    (r'''                    PanaceaClaudeIcon { anchors.centerIn: parent; width: 18; height: 18; kind: "send"
+                                        tint: parent.ready ? view.sys.colBg : view.sys.colMuted }
+''', r'''                    PanaceaClaudeIcon { anchors.centerIn: parent; width: 18; height: 18; kind: "send"; visible: !parent.stop
+                                        tint: parent.ready ? view.sys.colBg : view.sys.colMuted }
+                    Rectangle { anchors.centerIn: parent; visible: parent.stop; width: 10; height: 10; radius: 2.5; color: view.sys.colFg }
+'''),
+    (r'''                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: !view.busy && (input.text.trim().length || view.attachments.length) > 0; onClicked: view.send() }
+''', r'''                    MouseArea { id: stopMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: parent.ready || parent.stop
+                                onClicked: parent.stop ? view.interrupt() : view.send() }
+'''),
+    (r'''text: "Enter to send · Shift+Enter for a new line"''', r'''text: "Enter to send · Shift+Enter for a new line · / for commands"'''),
 ]
 
 
@@ -301,6 +491,11 @@ def main() -> int:
     for old, new in REPLACEMENTS:
         if out.count(old) != 1:
             print(f"chat-patch: anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in POST:
+        if out.count(old) != 1:
+            print(f"chat-patch: second-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 
