@@ -82,6 +82,7 @@ if not TOKEN_FILE.exists():
 TOKEN = TOKEN_FILE.read_text().strip()
 LOCK = threading.Lock()
 CARDS = []   # this run's answered approvals with their outcome (done / failed / denied)
+STEPS = []   # this run's timeline (text, tool and card steps, in order)
 
 
 def load_state():
@@ -144,7 +145,7 @@ def step_of(block):
             "Edit": lambda: "Editing " + str(inp.get("file_path", "")),
             "Write": lambda: "Writing " + str(inp.get("file_path", "")),
         }.get(name, lambda: "Using " + name)()
-        return {"k": "tool", "t": label[:300]}
+        return {"k": "tool", "t": label[:300], "id": block.get("id", "")}
     return None
 
 
@@ -194,6 +195,8 @@ def ask_claude(messages, model):
     # Stream the run: every thinking block, remark and tool call goes to
     # live.json so the chat can show what Claude is doing while it works.
     live = {"busy": True, "steps": [], "started": time.time(), "at": last.get("at")}
+    STEPS[:] = []
+    live["steps"] = STEPS
     write_live(live)
     out, tail = None, []
     errf = tempfile.TemporaryFile(mode="w+")   # a file, not a pipe: a full pipe would stall the run
@@ -211,7 +214,8 @@ def ask_claude(messages, model):
                 for block in (ev.get("message") or {}).get("content") or []:
                     st = step_of(block)
                     if st:
-                        live["steps"] = (live["steps"] + [st])[-12:]
+                        STEPS.append(st)
+                        del STEPS[:-40]          # in place: live["steps"] is STEPS
                         write_live(live)
             elif ev.get("type") == "user":
                 # tool results: an approval you answered becomes a record of what happened
@@ -220,6 +224,15 @@ def ask_claude(messages, model):
                     if card:
                         CARDS.append(card)
                         live["cards"] = CARDS[-8:]
+                        # the record takes the place of its own step, so the chat reads in
+                        # order: Claude's text, what it ran (and how it went), more text...
+                        tid = block.get("tool_use_id", "")
+                        for i, st in enumerate(live["steps"]):
+                            if st.get("k") == "tool" and st.get("id") == tid:
+                                live["steps"][i] = {"k": "card", "id": tid, **card}
+                                break
+                        else:
+                            live["steps"].append({"k": "card", "id": tid, **card})
                         write_live(live)
             elif ev.get("type") == "result":
                 out = ev
@@ -273,7 +286,13 @@ class Handler(BaseHTTPRequestHandler):
         # ("at", set by the chat). If the chat page was closed meanwhile (you left
         # it, or answered an approval from the notification), its request died
         # with it; the chat picks the reply up from here when it opens again.
-        write_live({"busy": False, "steps": [], "last": {"at": at, "answer": answer, "cards": CARDS[-8:]}})
+        # kept with the reply: Claude's in-between remarks and the actions you approved,
+        # in order (the last remark is usually the reply itself, so it's left out)
+        timeline = [st for st in STEPS if st.get("k") in ("text", "card")]
+        if timeline and timeline[-1].get("k") == "text" and answer.strip().startswith(timeline[-1]["t"][:200]):
+            timeline.pop()
+        write_live({"busy": False, "steps": [],
+                    "last": {"at": at, "answer": answer, "cards": CARDS[-8:], "timeline": timeline[-30:]}})
         self.reply(200, {"object": "chat.completion",
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": answer}}]})
