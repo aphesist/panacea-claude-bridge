@@ -100,7 +100,8 @@ def ask(tool, inp):
             ["notify-send", "-p", "--app-name", "Panacea Claude", "--icon", ICON,
              "--urgency", "normal", "--expire-time", "30000",
              "--action=panacea-allow=Allow", "--action=panacea-deny=Deny",
-             "Claude: " + title.lower(), html.escape(clip((why + "\n" if why else "") + str(body), 400))],
+             title,   # the card already says "Panacea Claude"
+             html.escape(clip((why + "\n" if why else "") + str(body), 400))],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         nid = (note.stdout.readline() or "").strip()
     except OSError:
