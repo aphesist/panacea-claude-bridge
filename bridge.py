@@ -30,6 +30,7 @@ WORKDIR = HOME                                           # same project (memory,
 APPROVE = pathlib.Path(__file__).resolve().with_name("approve-mcp.py")
 ATTACH = HOME / ".cache/panacea-claude/attachments"
 LIVE = HOME / ".cache/panacea-claude/live.json"         # progress for the chat (patched ChatView)
+CACHE = LIVE.parent                                       # approve-mcp.py leaves its decisions here
 TIMEOUT = 590                                            # chat.py (patched) waits 600 s
 
 SYSTEM = (
@@ -58,6 +59,7 @@ if not TOKEN_FILE.exists():
     TOKEN_FILE.chmod(0o600)
 TOKEN = TOKEN_FILE.read_text().strip()
 LOCK = threading.Lock()
+CARDS = []   # this run's answered approvals with their outcome (done / failed / denied)
 
 
 def load_state():
@@ -124,6 +126,20 @@ def step_of(block):
     return None
 
 
+def card_of(block):
+    """A tool_result whose call went through an approval -> {title, body, decision, ok}."""
+    if block.get("type") != "tool_result":
+        return None
+    f = CACHE / f"decision-{block.get('tool_use_id', '')}.json"
+    try:
+        d = json.loads(f.read_text())
+        f.unlink()
+    except (OSError, ValueError):
+        return None          # not one that asked you (auto-allowed reads and searches)
+    return {"title": d.get("title", ""), "body": d.get("body", ""),
+            "decision": d.get("choice", ""), "ok": not block.get("is_error", False)}
+
+
 def ask_claude(messages, model):
     last = messages[-1]
     if last.get("role") != "user":
@@ -175,6 +191,14 @@ def ask_claude(messages, model):
                     if st:
                         live["steps"] = (live["steps"] + [st])[-12:]
                         write_live(live)
+            elif ev.get("type") == "user":
+                # tool results: an approval you answered becomes a record of what happened
+                for block in (ev.get("message") or {}).get("content") or []:
+                    card = card_of(block) if isinstance(block, dict) else None
+                    if card:
+                        CARDS.append(card)
+                        live["cards"] = CARDS[-8:]
+                        write_live(live)
             elif ev.get("type") == "result":
                 out = ev
         proc.wait()
@@ -217,6 +241,7 @@ class Handler(BaseHTTPRequestHandler):
             msgs = req.get("messages") or []
             at = (msgs[-1] if msgs else {}).get("at")
             with LOCK:
+                CARDS.clear()
                 answer = ask_claude(msgs, req.get("model", ""))
         except subprocess.TimeoutExpired:
             answer = "Claude took too long (over 10 minutes) and was stopped."
@@ -226,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         # ("at", set by the chat). If the chat page was closed meanwhile (you left
         # it, or answered an approval from the notification), its request died
         # with it; the chat picks the reply up from here when it opens again.
-        write_live({"busy": False, "steps": [], "last": {"at": at, "answer": answer}})
+        write_live({"busy": False, "steps": [], "last": {"at": at, "answer": answer, "cards": CARDS[-8:]}})
         self.reply(200, {"object": "chat.completion",
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": answer}}]})

@@ -30,6 +30,7 @@ It also reshapes the chat tab into a single Claude tab:
 | Ctrl+Enter sends | **Enter** sends, Shift+Enter adds a new line, **Ctrl+N** starts a new chat |
 | A generic ✦ and "Add an API address, model and key in the launcher settings" | A small orange pixel Claude that walks and blinks, and nothing to configure |
 | "Думаю…" while it works | Live steps (searches, files read, commands) under a pulsing logo, and approval cards **in the conversation** |
+| Your messages and the reply blur together | Claude's replies carry its logo; each approval leaves a record in the conversation: **✓ Done**, **! Failed** or **× Denied**, with the exact command |
 | Opening the chat leaves the message box unfocused | `Super+C` opens it with the cursor in the message box |
 | Notifications that mention Claude/Codex pile up as cards in the chat | No notification cards in the chat (they stay in the notification centre) |
 | Your draft and attachments are lost when you leave the chat page | Kept: they come back when you return (and the paperclip's island picker, from panacea-config, adds to them) |
@@ -60,7 +61,7 @@ island chat ──POST /v1/chat/completions──▶ bridge.py (127.0.0.1:47321)
 
 <img src="docs/img/approval.png" width="420" alt="An approval card in the chat: 'Claude wants to run a command', the reason, the exact command, Deny and Allow">
 
-Anything not pre-approved waits for you: the card says what Claude wants to do,
+Anything not pre-approved waits for you, with the pixel Claude waving for your attention: the card says what Claude wants to do,
 why (in its own words), and the exact command or file. The in-chat card waits
 up to 2 minutes; no answer means denied, and Claude explains what it wanted
 instead of retrying.

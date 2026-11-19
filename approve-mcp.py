@@ -88,7 +88,7 @@ def close_notification(nid):
                        capture_output=True, timeout=5)
 
 
-def ask(tool, inp):
+def ask(tool, inp, tuid=""):
     title, body, why = describe(tool, inp)
     rid = uuid.uuid4().hex[:12]
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -124,6 +124,11 @@ def ask(tool, inp):
         time.sleep(0.2)
 
     write_json(APPROVAL, {})
+    # what you decided, for bridge.py: it pairs this with the tool's result and
+    # leaves a "done / failed / denied" record in the conversation
+    if tuid and all(c.isalnum() or c in "_-" for c in tuid):
+        write_json(CACHE / f"decision-{tuid}.json",
+                   {"title": title, "body": clip(body, 300), "choice": choice or "timeout"})
     if note:                                         # answered in the chat: withdraw the notification
         close_notification(nid)
         note.kill()
@@ -154,7 +159,7 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [TOOL]}})
     elif method == "tools/call":
         args = msg.get("params", {}).get("arguments", {}) or {}
-        res = ask(str(args.get("tool_name", "tool")), args.get("input") or {})
+        res = ask(str(args.get("tool_name", "tool")), args.get("input") or {}, str(args.get("tool_use_id") or ""))
         send({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}})
     elif method == "ping":
         send({"jsonrpc": "2.0", "id": mid, "result": {}})
