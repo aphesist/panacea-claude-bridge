@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v30"
+VERSION = "v31"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -209,13 +209,25 @@ REPLACEMENTS = [
      "        view.restoreChat();   // after a shell restart: the conversation, as you left it\n"
      "        // coming back from the island file picker (portal-patch in panacea-config):\n"
      "        // restore the draft and attachments, plus the files just picked\n"
-     "        if (sys.pendingChatAttach && sys.pendingChatAttach.length) {\n"
-     "            view.attachments = sys.pendingChatAttach; sys.pendingChatAttach = [];\n"
-     "        }\n"
-     "        if (sys.chatDraft) { input.text = sys.chatDraft; sys.chatDraft = \"\"; }\n"
+     "        view.takePending();\n"
      "        Qt.callLater(function () { input.forceActiveFocus(); input.cursorPosition = input.length; });   // type right away\n"
      "    }\n"
+     "    // ...and \"Ask Claude about this\" (scripts/custom/ask_claude.sh, IPC askAbout) hands over a\n"
+     "    // screen region or selected text the same way, also while the chat is already open;\n"
+     "    // with sys.chatAskSend it goes out at once (Settings > Claude > Then).\n"
+     "    property bool leaving: false\n"
+     "    function takePending() {\n"
+     "        if (view.leaving) return;\n"
+     "        if (sys.pendingChatAttach && sys.pendingChatAttach.length) {\n"
+     "            view.attachments = view.attachments.concat(sys.pendingChatAttach); sys.pendingChatAttach = [];\n"
+     "        }\n"
+     "        if (sys.chatDraft) { input.text = sys.chatDraft; sys.chatDraft = \"\"; input.cursorPosition = input.length; }\n"
+     "        if (sys.chatAskSend) { sys.chatAskSend = false; Qt.callLater(view.send); }\n"
+     "    }\n"
+     "    Connections { target: view.sys; ignoreUnknownSignals: true\n"
+     "        function onChatAskRevChanged() { view.takePending(); input.forceActiveFocus(); } }\n"
      "    Component.onDestruction: {\n"
+     "        view.leaving = true;\n"
      "        if (sys.chatDraft !== undefined) sys.chatDraft = input.text;\n"
      "        if (sys.pendingChatAttach !== undefined) sys.pendingChatAttach = view.attachments.slice();\n"
      "    }\n"),

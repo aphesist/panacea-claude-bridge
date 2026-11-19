@@ -72,6 +72,18 @@ def describe(tool, inp):
         return "Write a file", inp.get("file_path", ""), why
     if tool == "NotebookEdit":
         return "Edit a notebook", inp.get("notebook_path", ""), why
+    if tool.startswith("mcp__claudezilla__firefox_"):      # the browser (Claudezilla, in your Zen)
+        t = tool.removeprefix("mcp__claudezilla__firefox_")
+        target = inp.get("url") or inp.get("text") or inp.get("key") or inp.get("selector") or inp.get("ref") or ""
+        title = {"navigate": "Open a page in the browser", "create_window": "Open a new browser tab",
+                 "click": "Click on a web page", "type": "Type into a web page", "press_key": "Press a key in the browser",
+                 "close_tab": "Close a browser tab", "close_window": "Close its browser window",
+                 "attach_tab": "Take over a browser tab", "detach_tab": "Let go of a tab",
+                 "set_private_mode": "Switch private browsing", "handle_consent": "Dismiss a cookie banner",
+                 "start_loop": "Start a browser loop"}.get(t, "Use the browser (" + t.replace("_", " ") + ")")
+        if t == "type":
+            target = (str(inp.get("ref") or inp.get("selector") or "") + "  <-  " + str(inp.get("text", ""))).strip()
+        return title, str(target) or json.dumps(inp, ensure_ascii=False), why
     return f"Use {tool}", json.dumps(inp, ensure_ascii=False), why
 
 

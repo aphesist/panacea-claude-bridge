@@ -89,7 +89,89 @@ ASK = [f"Bash({c})" for c in (
     "systemctl suspend*", "systemctl hibernate*", "loginctl terminate*", "hyprctl dispatch exit*",
     "killall *", "pkill *", "kill -9 *", "chmod -R *", "chown -R *", "crontab -r*")]
 SETTINGS = json.dumps({"permissions": {"ask": ASK}})
-MCP = json.dumps({"mcpServers": {"panacea": {"command": "python3", "args": ["-I", str(APPROVE)]}}})
+MCP_PANACEA = {"panacea": {"command": "python3", "args": ["-I", str(APPROVE)]}}
+
+# ----------------------------------------------------------------- the browser (Claudezilla)
+# Claude can use the owner's own Zen through the Claudezilla extension + its MCP server
+# (~/.local/share/claudezilla). Settings > Claude in the island: on/off, and what asks first.
+PANACEA_CFG = HOME / ".config/panacea/settings.json"
+CLAUDEZILLA = HOME / ".local/share/claudezilla/mcp/server.js"
+FX = "mcp__claudezilla__firefox_"
+FX_READ = [FX + t for t in (
+    "get_content", "get_accessibility_snapshot", "get_page_state", "diff_page_state", "find",
+    "get_element", "get_tabs", "list_all_tabs", "screenshot", "get_console", "get_network",
+    "diagnose", "wait_for", "scroll", "loop_status", "get_slot_requests", "activate")]
+FX_ACT = [FX + t for t in (
+    "navigate", "create_window", "click", "type", "press_key", "close_tab", "close_window",
+    "attach_tab", "detach_tab", "resize_window", "set_viewport", "set_config", "set_private_mode",
+    "handle_consent", "start_loop", "stop_loop", "request_tab_space", "grant_tab_space")]
+FX_NEVER = [FX + "evaluate"]          # runs JavaScript in your pages: off, like Claudezilla's default
+BROWSER_PROMPT = (
+    "You can use a web browser through the claudezilla tools (firefox_*): Zen with a separate profile that "
+    "exists only for you (claude-zen-sandbox). The owner's own Zen and its tabs are out of your reach by design; "
+    "don't try to reach them. This profile is only signed in where the owner logged in to it by hand. "
+    "It starts by itself on your first browser call (allow up to a minute). Its window opens where the owner chose "
+    "in Settings > Claude (by default its own desktop, workspace 10 / Super+0) so they can watch you work; it never "
+    "takes focus. For sites that need a login (WhatsApp Web, etc.) ask them to log in in that window by hand "
+    "(e.g. scan the QR code); never ask for passwords. Read pages with "
+    "firefox_get_accessibility_snapshot (cheaper than screenshots). Close the tabs you opened when you're done "
+    "unless they want them kept. Never buy, send, post, delete or change account settings unless they asked "
+    "for exactly that."
+)
+BROWSER_BLOCKED = (
+    "The browser tools are switched off for this run: the owner's own Zen profile still has the Claudezilla "
+    "add-on, and Claude may only use its separate profile. If they ask for the browser, tell them to remove "
+    "Claudezilla from their Zen (about:addons > Claudezilla > Remove)."
+)
+ZEN = HOME / ".config/zen"
+ZEN_CLAUDE = ZEN / "claude"
+
+
+def own_zen_has_claudezilla():
+    """True if any of the owner's own Zen profiles (not Claude's) has the add-on installed."""
+    for ej in ZEN.glob("*/extensions.json"):
+        if ej.parent == ZEN_CLAUDE:
+            continue
+        try:
+            # removed in about:addons = pendingUninstall (and inactive) until Zen restarts: that one is gone
+            if any(a.get("id") == "claudezilla@boot.industries" and not a.get("pendingUninstall")
+                   for a in json.loads(ej.read_text()).get("addons", [])):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+def panacea_cfg():
+    try:
+        return json.loads(PANACEA_CFG.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def run_config():
+    """-> (mcp json, allowed, ask, denied, extra prompt) for this run, from the island's settings."""
+    cfg = panacea_cfg()
+    servers, allowed, ask, denied, extra = dict(MCP_PANACEA), list(ALLOWED), list(ASK), list(DENIED), ""
+    if cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists() and own_zen_has_claudezilla():
+        extra = BROWSER_BLOCKED          # sandbox broken: no browser at all until it's fixed
+    elif cfg.get("claudeBrowser", True) and CLAUDEZILLA.exists():
+        servers["claudezilla"] = {"command": "/usr/bin/node", "args": [str(CLAUDEZILLA), "--tools", "all"]}
+        if cfg.get("claudeBrowserAutostart", True):      # Claude's Zen starts on its first browser call
+            servers["claudezilla"]["env"] = {
+                "CLAUDEZILLA_AUTOSTART_CMD": json.dumps(["systemctl", "--user", "start", "zen-claude.service"]),
+                "CLAUDEZILLA_AUTOSTART_WAIT_MS": "60000"}
+        mode = cfg.get("claudeBrowserAsk", "actions")      # actions | all | none
+        if mode == "all":
+            ask += FX_READ + FX_ACT
+        elif mode == "none":
+            allowed += FX_READ + FX_ACT
+        else:
+            allowed += FX_READ
+            ask += FX_ACT
+        denied += FX_NEVER
+        extra = BROWSER_PROMPT
+    return json.dumps({"mcpServers": servers}), allowed, ask, denied, extra
 
 for d in (CONF, STATE.parent, WORKDIR, ATTACH):
     d.mkdir(parents=True, exist_ok=True)
@@ -216,9 +298,30 @@ def step_of(block):
             "Bash": lambda: str(inp.get("description") or ("Running " + str(inp.get("command", "")))),
             "Edit": lambda: "Editing " + str(inp.get("file_path", "")),
             "Write": lambda: "Writing " + str(inp.get("file_path", "")),
-        }.get(name, lambda: "Using " + name)()
+        }.get(name, lambda: FX_LABELS.get(name.removeprefix(FX), lambda i: "")(inp) or "Using " + name)()
         return {"k": "tool", "t": label[:300], "id": block.get("id", "")}
     return None
+
+
+FX_LABELS = {   # the browser's steps, in words
+    "navigate": lambda i: "Opening " + str(i.get("url", "")) + " in Claude's Zen",
+    "create_window": lambda i: "Opening " + str(i.get("url", "")) + " in Claude's Zen",
+    "get_accessibility_snapshot": lambda i: "Reading the page",
+    "get_content": lambda i: "Reading the page",
+    "get_page_state": lambda i: "Looking at the page",
+    "find": lambda i: "Looking for " + str(i.get("text") or i.get("query") or "something") + " on the page",
+    "screenshot": lambda i: "Taking a screenshot of the page",
+    "click": lambda i: "Clicking on the page",
+    "type": lambda i: "Typing into the page",
+    "press_key": lambda i: "Pressing " + str(i.get("key", "a key")),
+    "scroll": lambda i: "Scrolling the page",
+    "list_all_tabs": lambda i: "Looking at the open tabs",
+    "get_tabs": lambda i: "Looking at its tabs",
+    "attach_tab": lambda i: "Taking over a tab",
+    "close_tab": lambda i: "Closing a tab",
+    "wait_for": lambda i: "Waiting for the page",
+    "diagnose": lambda i: "Checking the browser connection",
+}
 
 
 def card_of(block):
@@ -253,12 +356,13 @@ def ask_claude(messages, model):
         hist = "\n\n".join(f"{m['role']}: {text_of(m.get('content'))}" for m in messages[:-1])
         prompt = f"(Earlier in this chat:)\n{hist}\n\n(New message:)\n{prompt}"
 
+    mcp, allowed, ask, denied, extra = run_config()
     cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
-           "--append-system-prompt", SYSTEM + "\n\n" + profile(),
-           "--mcp-config", MCP, "--strict-mcp-config",
-           "--permission-mode", "auto", "--settings", SETTINGS,
+           "--append-system-prompt", SYSTEM + ("\n\n" + extra if extra else "") + "\n\n" + profile(),
+           "--mcp-config", mcp, "--strict-mcp-config",
+           "--permission-mode", "auto", "--settings", json.dumps({"permissions": {"ask": ask}}),
            "--permission-prompt-tool", "mcp__panacea__approve",
-           "--allowedTools", *ALLOWED, "--disallowedTools", *DENIED]
+           "--allowedTools", *allowed, "--disallowedTools", *denied]
     if model and model not in ("claude", "default"):
         cmd += ["--model", model]
     if resume:
