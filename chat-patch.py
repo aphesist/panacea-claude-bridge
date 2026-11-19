@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v6"
+VERSION = "v7"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -102,6 +102,7 @@ REPLACEMENTS = [
      "            view.attachments = sys.pendingChatAttach; sys.pendingChatAttach = [];\n"
      "        }\n"
      "        if (sys.chatDraft) { input.text = sys.chatDraft; sys.chatDraft = \"\"; }\n"
+     "        Qt.callLater(function () { input.forceActiveFocus(); input.cursorPosition = input.length; });   // type right away\n"
      "    }\n"
      "    Component.onDestruction: {\n"
      "        if (sys.chatDraft !== undefined) sys.chatDraft = input.text;\n"
