@@ -53,7 +53,7 @@ def memory():
 def gpus():
     lines = [l.split(": ", 1)[1] for l in sh("lspci").splitlines()
              if re.search(r"VGA|3D controller|Display controller", l) and ": " in l]
-    nv = sh("nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader")
+    nv = read("/sys/module/nvidia/version").strip()   # not nvidia-smi: it wakes a sleeping dGPU
     if nv:
         lines.append(f"NVIDIA driver: {nv}")
     return lines
