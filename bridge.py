@@ -32,7 +32,7 @@ APPROVE = pathlib.Path(__file__).resolve().with_name("approve-mcp.py")
 ATTACH = HOME / ".cache/panacea-claude/attachments"
 LIVE = HOME / ".cache/panacea-claude/live.json"         # progress for the chat (patched ChatView)
 CACHE = LIVE.parent                                       # approve-mcp.py leaves its decisions here
-TIMEOUT = 590                                            # chat.py (patched) waits 600 s
+TIMEOUT = 0                                              # no limit: a reply runs until done (Stop ends it); chat.py waits as long
 
 SYSTEM = (
     "You are the sysadmin of this computer, answering in a small chat panel on its desktop "
@@ -45,6 +45,10 @@ SYSTEM = (
     "whole block). No headings, tables or images. Put anything the owner may type, paste or look for - commands, paths, "
     "package and service names, settings, keys - in inline code, and runnable steps in a fenced block, one command per "
     "line, nothing else in it (no prompts like $, no comments the shell can't take). Use a list for steps or several items. "
+    "Links open on click: when the owner would want to see something rather than type it - a picture, screenshot, "
+    "document, folder, log file, web page - give it as a Markdown link with a short name, e.g. [the screenshot](~/Pictures/x.png) "
+    "or [the wiki page](https://wiki.archlinux.org/...); absolute or ~ paths open in their app, folders in the file manager. "
+    "When they'd want to paste or type it (a path for a config, a command, a value), use inline code, which copies. "
     "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
     "You can search the web, read files, run commands, open apps (`hyprctl dispatch exec <app>`, `xdg-open <file-or-url>`) "
     "and edit files. You run in auto mode: most actions just run; destructive ones (deleting trees, root, disks, "
@@ -520,8 +524,9 @@ def ask_claude(messages, model):
     proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=subprocess.PIPE, stderr=errf, text=True)
     RUN["proc"], RUN["stopped"] = proc, False
     sid = resume
-    killer = threading.Timer(TIMEOUT, proc.kill)
-    killer.start()
+    killer = threading.Timer(TIMEOUT, proc.kill) if TIMEOUT else None
+    if killer:
+        killer.start()
     try:
         for line in proc.stdout:
             tail = (tail + [line])[-5:]
@@ -567,7 +572,8 @@ def ask_claude(messages, model):
                 out = ev
         proc.wait()
     finally:
-        killer.cancel()   # live.json is closed by do_POST, together with the reply
+        if killer:
+            killer.cancel()   # live.json is closed by do_POST, together with the reply
         RUN["proc"] = None
     if RUN["stopped"]:
         # stopped from the chat: keep the session so the next message carries on from here
@@ -576,7 +582,7 @@ def ask_claude(messages, model):
             save_state({"session_id": sid, "last_reply": reply})
         return reply
     if out is None:
-        if proc.returncode in (-9, 137):
+        if TIMEOUT and proc.returncode in (-9, 137):
             raise subprocess.TimeoutExpired(cmd, TIMEOUT)
         errf.seek(0)
         err = errf.read()

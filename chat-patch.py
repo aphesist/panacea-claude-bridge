@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v33"
+VERSION = "v35"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -370,11 +370,14 @@ Rectangle {
 '''
 
 TEXT_QML = r'''import QtQuick
+import Quickshell
 
 // written by chat-patch.py (panacea-claude-bridge)
 // Claude's text, readable: paragraphs, '-' and '1.' lists (nested by two spaces), **bold**,
-// links, `inline code` in a colour of its own (a click copies it) and ``` blocks in a box
-// (a click anywhere on the box copies all of it). Plain text stays selectable.
+// `inline code` in a colour of its own (a click copies it), ``` blocks in a box (a click
+// anywhere on the box copies all of it), and [links](target) that open what they point to:
+// a file or picture in its app, a folder in Files, a page in the browser. Copy is red and
+// monospaced; open is white and underlined. Plain text stays selectable.
 Item {
     id: md
     property var sys
@@ -401,14 +404,32 @@ Item {
                      + '; text-decoration:none; font-family:\'' + (md.sys ? md.sys.fontFam : "monospace") + '\'">'
                      + md.esc(c) + '</a>';
             } else {
-                var t = md.esc(p);
-                t = t.replace(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/g,
-                              '<a href="$1" style="color:' + md.fg + '; text-decoration:underline">$1</a>');
-                t = t.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-                out += t;
+                // [label](target): opens; the rest is plain text with bold and bare web links
+                var re = /\[([^\]\n]+)\]\(([^)\s]+)\)/g, last = 0, m;
+                while ((m = re.exec(p)) !== null) {
+                    out += md.plain(p.slice(last, m.index));
+                    out += '<a href="open:' + encodeURIComponent(m[2]) + '" style="color:' + md.fg
+                         + '; text-decoration:underline">' + md.esc(m[1]) + '</a>';
+                    last = re.lastIndex;
+                }
+                out += md.plain(p.slice(last));
             }
         }
         return out;
+    }
+    function plain(s) {
+        var t = md.esc(s);
+        t = t.replace(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/g,
+                      '<a href="open:$1" style="color:' + md.fg + '; text-decoration:underline">$1</a>');
+        return t.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+    }
+    // what an open link points to -> a URL the desktop can open (xdg-open via Qt)
+    function target(t) {
+        t = decodeURIComponent(t);
+        if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return t;              // https:, file:, mailto:...
+        if (t.indexOf("~/") === 0 || t === "~") t = Quickshell.env("HOME") + t.slice(1);
+        if (t.charAt(0) === "/") return "file://" + encodeURI(t);
+        return "https://" + t;                                       // a bare domain
     }
     function parse(src) {
         var lines = String(src || "").replace(/\r/g, "").split("\n");
@@ -459,7 +480,9 @@ Item {
     }
     function activate(link, item, x, y) {
         if (link.indexOf("copy:") === 0) md.copy(decodeURIComponent(link.slice(5)), item, x, y);
-        else Qt.openUrlExternally(link);
+        // straight to the default app (xdg-open): the portal's route asks "Open with..." first
+        else if (link.indexOf("open:") === 0) Quickshell.execDetached(["xdg-open", md.target(link.slice(5))]);
+        else Quickshell.execDetached(["xdg-open", link]);
     }
 
     Column {
@@ -1213,12 +1236,13 @@ def write_atomic(p, text):
 
 CHAT_PY = os.path.expanduser("~/.config/panacea/scripts/chat.py")
 CHAT_PY_OLD = "urlopen(req,timeout=90)"
-CHAT_PY_NEW = "urlopen(req,timeout=600)"   # room for approval cards (no inline comment: mid-line)
+CHAT_PY_NEW = "urlopen(req,timeout=None)"   # no limit: a reply runs until it's done (no inline comment: mid-line)
+CHAT_PY_V4 = "urlopen(req,timeout=600)"     # the earlier ten-minute limit
 CHAT_PY_BROKEN = "urlopen(req,timeout=600)  # panacea-claude: room for approval cards"   # chat-patch v4 bug
 
 
 def patch_chat_py():
-    """The chat script gives up after 90 s; Claude may wait on approval cards."""
+    """The chat script gives up after 90 s; a reply may take long (tasks, approval cards): no limit."""
     try:
         s = read(CHAT_PY)
     except OSError:
@@ -1229,6 +1253,8 @@ def patch_chat_py():
         os.chmod(CHAT_PY, 0o755)
     if CHAT_PY_NEW in s:
         return
+    if s.count(CHAT_PY_V4) == 1:
+        s = s.replace(CHAT_PY_V4, CHAT_PY_OLD)
     if s.count(CHAT_PY_OLD) != 1:
         print("chat-patch: chat.py timeout anchor not found - long tasks may time out", file=sys.stderr)
         return
