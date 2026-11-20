@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v32"
+VERSION = "v33"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -146,16 +146,14 @@ Item {
     Component.onCompleted: { if (animateIn) opacity = 1; ready = true; }
     Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
 
-    // a remark: plain text, like the reply itself
-    Text {
+    // a remark: formatted like the reply itself (code in colour, a click copies it)
+    PanaceaClaudeText {
         id: line
         y: st.gap
         visible: st.kind === "text"
-        width: st.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
-        text: st.text
-        color: st.sys.colFg
-        font.pixelSize: 13
-        lineHeight: 1.15
+        width: st.width
+        sys: st.sys; r: st.rInner
+        text: st.kind === "text" ? st.text : ""
     }
 
     // a tool: one quiet line with a chevron; opens to the command and its output
@@ -371,6 +369,225 @@ Rectangle {
 }
 '''
 
+TEXT_QML = r'''import QtQuick
+
+// written by chat-patch.py (panacea-claude-bridge)
+// Claude's text, readable: paragraphs, '-' and '1.' lists (nested by two spaces), **bold**,
+// links, `inline code` in a colour of its own (a click copies it) and ``` blocks in a box
+// (a click anywhere on the box copies all of it). Plain text stays selectable.
+Item {
+    id: md
+    property var sys
+    property string text: ""
+    property real r: 10
+    property int size: 13
+    property color fg: sys ? sys.colFg : "white"
+    // what to type, paste or look for: the island's red, lifted so it reads on black
+    readonly property color codeColor: "#ff7a7f"
+    implicitHeight: col.implicitHeight
+    height: implicitHeight
+
+    readonly property var blocks: md.parse(md.text)
+
+    function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function inline(s) {
+        var out = "", parts = String(s).split(/(`[^`\n]+`)/);
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i];
+            if (!p) continue;
+            if (p.length > 2 && p.charAt(0) === "`" && p.charAt(p.length - 1) === "`") {
+                var c = p.slice(1, -1);
+                out += '<a href="copy:' + encodeURIComponent(c) + '" style="color:' + md.codeColor
+                     + '; text-decoration:none; font-family:\'' + (md.sys ? md.sys.fontFam : "monospace") + '\'">'
+                     + md.esc(c) + '</a>';
+            } else {
+                var t = md.esc(p);
+                t = t.replace(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/g,
+                              '<a href="$1" style="color:' + md.fg + '; text-decoration:underline">$1</a>');
+                t = t.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+                out += t;
+            }
+        }
+        return out;
+    }
+    function parse(src) {
+        var lines = String(src || "").replace(/\r/g, "").split("\n");
+        var out = [], para = [], list = null, i = 0;
+        function flushPara() { if (para.length) { out.push({ k: "p", h: para.map(md.inline).join("<br>") }); para = []; } }
+        function flushList() { if (list) { out.push(list); list = null; } }
+        while (i < lines.length) {
+            var L = lines[i];
+            var f = /^\s*```\s*([\w+#.-]*)\s*$/.exec(L);
+            if (f) {
+                flushPara(); flushList();
+                var code = []; i++;
+                while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+                i++;
+                out.push({ k: "code", lang: f[1], t: code.join("\n").replace(/\s+$/, "") });
+                continue;
+            }
+            var m = /^(\s*)([-*•]|\d+[.)])\s+(.*)$/.exec(L);
+            if (m) {
+                flushPara();
+                if (!list) list = { k: "list", items: [] };
+                list.items.push({ lvl: Math.min(3, Math.floor(m[1].replace(/\t/g, "  ").length / 2)),
+                                  mark: /\d/.test(m[2]) ? m[2].replace(")", ".") : "•", h: md.inline(m[3]) });
+                i++; continue;
+            }
+            if (/^\s*$/.test(L)) { flushPara(); flushList(); i++; continue; }
+            if (list && /^\s{2,}\S/.test(L)) {          // a list item running on to the next line
+                var last = list.items[list.items.length - 1];
+                last.h += "<br>" + md.inline(L.trim());
+                i++; continue;
+            }
+            var h = /^#{1,4}\s+(.*)$/.exec(L);
+            if (h) { flushPara(); flushList(); out.push({ k: "h", h: md.inline(h[1]) }); i++; continue; }
+            flushList(); para.push(L); i++;
+        }
+        flushPara(); flushList();
+        return out;
+    }
+    function html(h) { return '<div style="line-height:118%">' + h + '</div>'; }
+
+    // "Copied": a small pill where you clicked, fading out
+    function copy(t, item, x, y) {
+        if (md.sys && md.sys.copyText) md.sys.copyText(t);
+        var p = item.mapToItem(md, x, y);
+        tip.x = Math.max(0, Math.min(md.width - tip.width, p.x - tip.width / 2));
+        tip.y = Math.max(0, p.y - tip.height - 6);
+        tipAnim.restart();
+    }
+    function activate(link, item, x, y) {
+        if (link.indexOf("copy:") === 0) md.copy(decodeURIComponent(link.slice(5)), item, x, y);
+        else Qt.openUrlExternally(link);
+    }
+
+    Column {
+        id: col
+        width: md.width
+        spacing: 8
+        Repeater {
+            model: md.blocks
+            delegate: Loader {
+                required property var modelData
+                property var b: modelData
+                width: md.width
+                sourceComponent: b.k === "code" ? codeBlock : b.k === "list" ? listBlock : textBlock
+            }
+        }
+    }
+
+    Component {
+        id: textBlock
+        TextEdit {
+            id: te
+            width: parent ? parent.width : 0
+            readOnly: true; selectByMouse: true; persistentSelection: false
+            textFormat: TextEdit.RichText; wrapMode: TextEdit.Wrap
+            text: md.html(parent ? parent.b.h : "")
+            color: md.fg
+            selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: md.fg
+            font { pixelSize: md.size; bold: parent ? parent.b.k === "h" : false; family: md.sys ? md.sys.fontBody : "" }
+            onLinkActivated: link => md.activate(link, te, teHover.point.position.x, teHover.point.position.y)
+            HoverHandler { id: teHover; cursorShape: te.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+        }
+    }
+
+    Component {
+        id: listBlock
+        Column {
+            width: parent ? parent.width : 0
+            spacing: 4
+            Repeater {
+                model: parent && parent.parent ? parent.parent.b.items : []
+                delegate: Item {
+                    id: li
+                    required property var modelData
+                    required property int index
+                    readonly property real indent: modelData.lvl * 16
+                    readonly property real markW: modelData.mark === "•" ? 16 : 24
+                    width: parent ? parent.width : 0
+                    height: Math.max(liText.implicitHeight, 18)
+                    Text {
+                        x: li.indent; width: li.markW
+                        text: li.modelData.mark
+                        color: md.sys ? md.sys.colMuted : "grey"
+                        font { pixelSize: md.size; family: md.sys ? md.sys.fontBody : "" }
+                    }
+                    TextEdit {
+                        id: liText
+                        x: li.indent + li.markW; width: li.width - x
+                        readOnly: true; selectByMouse: true
+                        textFormat: TextEdit.RichText; wrapMode: TextEdit.Wrap
+                        text: md.html(li.modelData.h)
+                        color: md.fg
+                        selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: md.fg
+                        font { pixelSize: md.size; family: md.sys ? md.sys.fontBody : "" }
+                        onLinkActivated: link => md.activate(link, liText, liHover.point.position.x, liHover.point.position.y)
+                        HoverHandler { id: liHover; cursorShape: liText.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+                    }
+                }
+            }
+        }
+    }
+
+    Component {
+        id: codeBlock
+        Rectangle {
+            id: cb
+            readonly property string code: parent ? parent.b.t : ""
+            readonly property string lang: parent ? parent.b.lang : ""
+            property bool done: false
+            width: parent ? parent.width : 0
+            height: codeText.implicitHeight + 22
+            radius: Math.max(8, md.r)
+            color: cbMa.containsMouse ? Qt.rgba(1, 1, 1, 0.085) : Qt.rgba(1, 1, 1, 0.05)
+            Behavior on color { ColorAnimation { duration: 120 } }
+            Text {
+                id: codeText
+                x: 12; y: 11; width: parent.width - 24 - copyMark.width - 8
+                text: cb.code
+                textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere
+                color: md.codeColor
+                font { family: md.sys ? md.sys.fontFam : "monospace"; pixelSize: md.size - 1 }
+                lineHeight: 1.15
+            }
+            // the copy mark: an icon, a check for a moment once copied
+            Text {
+                id: copyMark
+                anchors.right: parent.right; anchors.rightMargin: 11; y: 10
+                text: cb.done ? "✓" : String.fromCodePoint(0xF018F)
+                color: cb.done || cbMa.containsMouse ? md.fg : (md.sys ? md.sys.colMuted : "grey")
+                font { family: md.sys ? md.sys.fontFam : "monospace"; pixelSize: 13 }
+            }
+            Timer { id: cbDone; interval: 1400; onTriggered: cb.done = false }
+            MouseArea {
+                id: cbMa
+                anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                onClicked: mouse => { md.copy(cb.code, cb, mouse.x, mouse.y); cb.done = true; cbDone.restart(); }
+            }
+        }
+    }
+
+    Rectangle {
+        id: tip
+        z: 50
+        width: tipText.implicitWidth + 16; height: 22; radius: 11
+        color: Qt.rgba(0.12, 0.12, 0.12, 0.96)
+        opacity: 0
+        visible: opacity > 0
+        Text { id: tipText; anchors.centerIn: parent; text: "Copied"; color: md.fg
+               font { pixelSize: 11; bold: true; family: md.sys ? md.sys.fontBody : "" } }
+        SequentialAnimation {
+            id: tipAnim
+            NumberAnimation { target: tip; property: "opacity"; to: 1; duration: 90 }
+            PauseAnimation { duration: 800 }
+            NumberAnimation { target: tip; property: "opacity"; to: 0; duration: 260 }
+        }
+    }
+}
+'''
+
 FILE_QML = r'''import QtQuick
 import QtQuick.Effects
 
@@ -452,6 +669,7 @@ EXTRA = {
     "PanaceaClaudeCritter.qml": 'import QtQuick\n\n// written by chat-patch.py (panacea-claude-bridge)\n// The pixel Claude, with a mood for each state of the chat:\n//   idle      empty chat: a slow walk in place, a gentle bob, blinks\n//   thinking  eyes up, "· · ·" lighting up above its head\n//   working   running a tool: quick steps, eyes focused ahead\n//   waiting   a card needs you: it stops and glances toward it\n//   asking    on the card itself: waves one arm, then the other, with a hop\nItem {\n    id: pc\n    property int px: 3\n    property string mood: "idle"\n    property int frame: 0\n    property bool blink: false\n    readonly property color bodyColor: "#d97757"\n    readonly property color eyeColor: "#141414"\n    readonly property color dotColor: Qt.rgba(1, 1, 1, 0.8)\n    readonly property int interval: ({ idle: 320, thinking: 300, working: 150, waiting: 420, asking: 260 })[mood] || 300\n    // 9 rows: 2 above the head (thought dots), 6 of body, 1 of legs\n    readonly property var grid: build(mood, frame, blink)\n    readonly property real hop: mood === "asking" ? (frame % 2 === 0 ? 0 : px)\n                              : mood === "idle" ? (Math.floor(frame / 2) % 2 === 0 ? 0 : px * 0.5)\n                              : 0\n    width: 11 * px; height: 9 * px + px\n\n    onMoodChanged: frame = 0\n\n    function setAt(row, col, ch) { return row.substring(0, col) + ch + row.substring(col + 1); }\n    function build(m, f, b) {\n        var top = ["...........", "..........."];\n        var body = ["..XXXXXXX..", "..XXXXXXX..", "..XXXXXXX..", "XXXXXXXXXXX", "XXXXXXXXXXX", "..XXXXXXX.."];\n        var stand = "..X.X.X.X..", step = ".X.X.X.X...";\n        var legs = stand, er = 2, el = 3, eR = 7;\n        if (m === "idle") {\n            legs = Math.floor(f / 2) % 2 ? step : stand;\n        } else if (m === "thinking") {\n            er = 1;                                            // eyes up\n            if (Math.floor(f / 4) % 2) { el = 4; eR = 8; }     // ...and drifting while it ponders\n            var lit = f % 4;                                   // · · · filling in, then clearing\n            for (var i = 0; i < 3; i++) if (i < lit) top[0] = setAt(top[0], 4 + 2 * i, "D");\n        } else if (m === "working") {\n            legs = f % 2 ? step : stand;\n            el = 4; eR = 8;                                    // focused on the task\n        } else if (m === "waiting") {\n            er = 2; el = 4; eR = 8;                            // a look toward the card\n            top[1] = setAt(top[1], 9, Math.floor(f / 3) % 2 ? "D" : ".");   // a small "!" blink\n            top[0] = setAt(top[0], 9, Math.floor(f / 3) % 2 ? "D" : ".");\n        } else if (m === "asking") {\n            var w = f % 4;\n            if (w === 0) {                                     // left arm up\n                body[1] = setAt(setAt(body[1], 0, "X"), 1, "X"); body[2] = setAt(setAt(body[2], 0, "X"), 1, "X");\n                body[3] = setAt(setAt(body[3], 0, "."), 1, "."); body[4] = setAt(setAt(body[4], 0, "."), 1, ".");\n            } else if (w === 2) {                              // right arm up\n                body[1] = setAt(setAt(body[1], 9, "X"), 10, "X"); body[2] = setAt(setAt(body[2], 9, "X"), 10, "X");\n                body[3] = setAt(setAt(body[3], 9, "."), 10, "."); body[4] = setAt(setAt(body[4], 9, "."), 10, ".");\n            }\n            legs = w % 2 ? step : stand;\n        }\n        if (!b) { body[er] = setAt(setAt(body[er], el, "E"), eR, "E"); }\n        return top.concat(body).concat([legs]);\n    }\n\n    Timer { interval: pc.interval; repeat: true; running: pc.visible; onTriggered: pc.frame = (pc.frame + 1) % 8 }\n    Timer { interval: 3200; repeat: true; running: pc.visible && pc.mood !== "thinking"\n            onTriggered: { pc.blink = true; pcUnblink.restart(); } }\n    Timer { id: pcUnblink; interval: 140; onTriggered: pc.blink = false }\n\n    Grid {\n        columns: 11\n        y: pc.hop\n        Behavior on y { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }\n        Repeater {\n            model: 99\n            Rectangle {\n                required property int index\n                readonly property string ch: pc.grid[Math.floor(index / 11)].charAt(index % 11)\n                width: pc.px; height: pc.px\n                color: ch === "X" ? pc.bodyColor : ch === "E" ? pc.eyeColor : ch === "D" ? pc.dotColor : "transparent"\n            }\n        }\n    }\n}\n',
     "PanaceaClaudeCard.qml": CARD_QML,
     "PanaceaClaudeFile.qml": FILE_QML,
+    "PanaceaClaudeText.qml": TEXT_QML,
 }
 
 REPLACEMENTS = [
@@ -802,6 +1020,182 @@ UX = [
      '{ if (!view.busy) { view.sys.islandChatMessages = []; view.attachments = []; view.queue = []; input.text = ""; } event.accepted = true; }'),
 ]
 
+# v33: the page opens without a stutter (a window on the last messages, in a ListModel that
+# grows a row at a time), only the new message goes to the bridge (it keeps one session),
+# and replies read well: lists, colour for code, one click to copy, a copy button per message.
+UX2 = [
+    ("""    Connections { target: view.sys
+        function onIslandChatMessagesChanged() { if (!view.restoring) chatStore.setText(JSON.stringify(view.sys.islandChatMessages)); } }
+""", """    Connections { target: view.sys
+        function onIslandChatMessagesChanged() {
+            if (!view.restoring) chatStore.setText(JSON.stringify(view.sys.islandChatMessages.slice(-400)));
+            view.syncMsgs();
+        } }
+    // """ + TAG + """: the conversation on screen is a window on its last messages, kept in a
+    // ListModel: a new message adds one row instead of rebuilding every message (that rebuild,
+    // and building the whole history when the page opened, was the stutter). The newest few
+    // show at once, the rest of the first page a few rows per frame; older ones come in pages
+    // from "Show earlier". Clearing the chat only clears this view: Claude keeps its session,
+    // its notebook and its journal (bridge.py).
+    ListModel { id: msgModel }
+    readonly property int pageSize: 16
+    property int shownFrom: 0
+    property int fillTo: 0
+    property int syncedLen: 0
+    property string syncedLast: ""
+    property real holdDist: -1          // while older rows come in above: keep the view where it is
+    function msgRow(i) { return { j: JSON.stringify(view.sys.islandChatMessages[i]), n: i }; }
+    function rebuildMsgs() {
+        var m = view.sys.islandChatMessages;
+        fillTimer.stop(); msgModel.clear();
+        var first = Math.max(0, m.length - 4);
+        for (var i = first; i < m.length; i++) msgModel.append(view.msgRow(i));
+        view.shownFrom = first;
+        view.syncedLen = m.length; view.syncedLast = m.length ? JSON.stringify(m[m.length - 1]) : "";
+        view.fillTo = Math.max(0, m.length - view.pageSize);
+        if (view.shownFrom > view.fillTo) fillTimer.start();
+    }
+    Timer { id: fillTimer; interval: 16; repeat: true
+        onTriggered: { if (view.shownFrom <= view.fillTo) { stop(); return; } view.prependMsgs(Math.max(view.fillTo, view.shownFrom - 3)); } }
+    function prependMsgs(from) {
+        if (view.holdDist < 0 && scroll.contentItem) view.holdDist = scroll.contentHeight - scroll.contentItem.contentY;
+        holdTimer.restart();
+        for (var i = view.shownFrom - 1; i >= from; i--) msgModel.insert(0, view.msgRow(i));
+        view.shownFrom = from;
+    }
+    Timer { id: holdTimer; interval: 200; onTriggered: view.holdDist = -1 }
+    function showEarlier() { view.fillTo = Math.max(0, view.shownFrom - view.pageSize); fillTimer.start(); }
+    function syncMsgs() {
+        var m = view.sys.islandChatMessages;
+        if (view.syncedLen > 0 && m.length > view.syncedLen && JSON.stringify(m[view.syncedLen - 1]) === view.syncedLast) {
+            for (var i = view.syncedLen; i < m.length; i++) msgModel.append(view.msgRow(i));
+        } else if (m.length !== view.syncedLen || (m.length && JSON.stringify(m[m.length - 1]) !== view.syncedLast)) {
+            view.rebuildMsgs(); return;
+        }
+        view.syncedLen = m.length; view.syncedLast = m.length ? JSON.stringify(m[m.length - 1]) : "";
+    }
+"""),
+    ("""        view.restoreQueue();  // and what you'd queued
+""", """        view.restoreQueue();  // and what you'd queued
+        if (!view.syncedLen) view.rebuildMsgs();   // """ + TAG + """: the page's window on the chat
+"""),
+    ("""                Repeater {
+                    model: view.sys.islandChatMessages
+                    delegate: Column {
+                        id: msgItem
+                        required property var modelData
+                        required property int index
+                        readonly property bool mine: modelData.role === "user"
+                        readonly property bool cmdReply: !mine && index > 0
+                            && String((view.sys.islandChatMessages[index - 1] || {}).content || "").charAt(0) === "/"
+""", """                // """ + TAG + """: older messages, a page at a time
+                Item {
+                    visible: view.shownFrom > 0
+                    width: parent.width; height: 30
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: earlierText.implicitWidth + 26; height: 28; radius: 14
+                        color: earlierMa.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05)
+                        Behavior on color { ColorAnimation { duration: 120 } }
+                        Text { id: earlierText; anchors.centerIn: parent
+                               text: "Show earlier · " + view.shownFrom
+                               color: earlierMa.containsMouse ? view.sys.colFg : view.sys.colMuted
+                               font { pixelSize: 11; bold: true; family: view.sys.fontBody } }
+                        MouseArea { id: earlierMa; anchors.fill: parent; hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor; onClicked: view.showEarlier() }
+                    }
+                }
+                Repeater {
+                    model: msgModel
+                    delegate: Column {
+                        id: msgItem
+                        required property string j
+                        required property int n
+                        readonly property var modelData: JSON.parse(j)
+                        readonly property bool mine: modelData.role === "user"
+"""),
+    ("""                        // yours: a bubble on the right; Claude's: plain text across the width
+                        Rectangle {
+                            visible: String(msgItem.modelData.content || "").length > 0
+                            anchors.right: msgItem.mine ? parent.right : undefined
+                            width: msgItem.mine ? message.width + 28 : parent.width
+                            height: message.implicitHeight + (msgItem.mine ? 20 : 0)
+                            radius: view.boxR
+                            color: msgItem.mine ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                            Text { id: message
+                                   x: msgItem.mine ? 14 : 0; y: msgItem.mine ? 10 : 0
+                                   width: msgItem.mine ? Math.min(implicitWidth, msgItem.width * 0.78 - 28) : parent.width
+                                   text: msgItem.modelData.content; color: view.sys.colFg; wrapMode: Text.Wrap
+                                   textFormat: msgItem.cmdReply ? Text.MarkdownText : Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }
+                        }
+""", """                        // yours: a bubble on the right; Claude's: formatted text across the width (lists,
+                        // code in colour - a click copies it). Hover either for a copy button.
+                        Item {
+                            id: msgBody
+                            readonly property string content: String(msgItem.modelData.content || "")
+                            property bool copied: false
+                            visible: content.length > 0
+                            width: parent.width
+                            height: msgItem.mine ? bubble.height : reply.height + 26
+                            HoverHandler { id: msgHover }
+                            Rectangle {
+                                id: bubble
+                                visible: msgItem.mine
+                                anchors.right: parent.right
+                                width: message.width + 28; height: message.implicitHeight + 20
+                                radius: view.boxR
+                                color: Qt.rgba(1, 1, 1, 0.1)
+                                Text { id: message; x: 14; y: 10
+                                       width: Math.min(implicitWidth, msgItem.width * 0.78 - 28)
+                                       text: msgItem.mine ? msgBody.content : ""; color: view.sys.colFg; wrapMode: Text.Wrap
+                                       textFormat: Text.PlainText; font.pixelSize: 13; lineHeight: 1.15 }
+                            }
+                            PanaceaClaudeText {
+                                id: reply
+                                visible: !msgItem.mine
+                                width: parent.width
+                                sys: view.sys; r: view.rInner
+                                text: msgItem.mine ? "" : msgBody.content
+                            }
+                            Rectangle {
+                                id: copyBtn
+                                width: copyRow.implicitWidth + 16; height: 22; radius: 11
+                                x: msgItem.mine ? bubble.x - width - 6 : -4
+                                y: msgItem.mine ? (bubble.height - height) / 2 : reply.height + 4
+                                color: copyMa.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
+                                opacity: msgHover.hovered || msgBody.copied ? 1 : 0
+                                visible: opacity > 0
+                                Behavior on opacity { NumberAnimation { duration: 140 } }
+                                Row {
+                                    id: copyRow; anchors.centerIn: parent; spacing: 5
+                                    Text { anchors.verticalCenter: parent.verticalCenter
+                                           text: msgBody.copied ? "✓" : String.fromCodePoint(0xF018F)
+                                           color: copyMa.containsMouse || msgBody.copied ? view.sys.colFg : view.sys.colMuted
+                                           font { family: view.sys.fontFam; pixelSize: 12 } }
+                                    Text { anchors.verticalCenter: parent.verticalCenter
+                                           text: msgBody.copied ? "Copied" : "Copy"
+                                           color: copyMa.containsMouse || msgBody.copied ? view.sys.colFg : view.sys.colMuted
+                                           font { pixelSize: 11; family: view.sys.fontBody } }
+                                }
+                                Timer { id: copiedTimer; interval: 1400; onTriggered: msgBody.copied = false }
+                                MouseArea { id: copyMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                                            onClicked: { view.sys.copyText(msgBody.content); msgBody.copied = true; copiedTimer.restart(); } }
+                            }
+                        }
+"""),
+    ("""        payload = JSON.stringify({messages:a, files:attachments});
+""", """        // """ + TAG + """: only the new message: the bridge keeps the conversation in its session
+        payload = JSON.stringify({messages:[{role:"user", content:msg, at:a[a.length - 1].at}], files:attachments});
+"""),
+    ("""            onContentHeightChanged: {
+                if (contentItem && contentItem.contentY >= lastH - availableHeight - 40)
+""", """            onContentHeightChanged: {
+                // """ + TAG + """: older rows coming in above keep what you're looking at in place
+                if (view.holdDist >= 0 && contentItem) { contentItem.contentY = Math.max(0, contentHeight - view.holdDist); lastH = contentHeight; return; }
+                if (contentItem && contentItem.contentY >= lastH - availableHeight - 40)
+"""),
+]
+
 
 def read(p):
     with open(p, encoding="utf-8") as f:
@@ -886,6 +1280,11 @@ def main() -> int:
     for old, new in UX:
         if out.count(old) != 1:
             print(f"chat-patch: UX-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX2:
+        if out.count(old) != 1:
+            print(f"chat-patch: v33-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 

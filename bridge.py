@@ -40,7 +40,11 @@ SYSTEM = (
     "on it before guessing: check logs (journalctl), configs, package versions and running services, "
     "and use the web for current docs and known issues. Diagnose first, then fix with the smallest change, "
     "and say how to undo anything non-trivial. "
-    "The panel shows plain text only: no Markdown headings, tables or bold; short paragraphs and simple '-' lists are fine. "
+    "The panel renders light Markdown: short paragraphs, '-' and '1.' lists (nested by two spaces), **bold**, "
+    "`inline code` (shown in a colour; one click copies it) and ``` fenced blocks (shown in a box; one click copies the "
+    "whole block). No headings, tables or images. Put anything the owner may type, paste or look for - commands, paths, "
+    "package and service names, settings, keys - in inline code, and runnable steps in a fenced block, one command per "
+    "line, nothing else in it (no prompts like $, no comments the shell can't take). Use a list for steps or several items. "
     "Keep answers concise unless asked for detail. Attached files are given as paths you may Read. "
     "You can search the web, read files, run commands, open apps (`hyprctl dispatch exec <app>`, `xdg-open <file-or-url>`) "
     "and edit files. You run in auto mode: most actions just run; destructive ones (deleting trees, root, disks, "
@@ -50,6 +54,88 @@ SYSTEM = (
     "For anything that needs root, use `pkexec <command>` (never sudo): it asks for the password in the island. "
     "Your memory and notes are shared with the owner's other Claude Code sessions on this machine."
 )
+# ----------------------------------------------------------------- memory across clears
+# One Claude for the island: the chat's "new chat" only clears the view, the same Claude
+# Code session carries on (it compacts itself when long). Beyond the session, two files:
+#   notebook.md  - Claude's own working notes (what's in progress, decisions, things to carry
+#                  forward). Claude keeps it; its contents ride along with every message.
+#   journal/     - every exchange, logged by the bridge (YYYY-MM.md). Claude searches it when
+#                  something from before isn't in context; a fresh session starts with its tail.
+NOTES = HOME / ".local/share/panacea-claude/notebook"
+NOTEBOOK = NOTES / "notebook.md"
+JOURNAL = NOTES / "journal"
+NOTEBOOK_MAX = 10000          # chars of the notebook sent along
+SESSION_MAX = 80 * 1024 * 1024   # a session file past this starts afresh (the notebook carries on)
+NOTEBOOK_SEED = (
+    "# Island notebook\n\n"
+    "Claude's working notes for the Panacea island chat. Kept across cleared chats and new sessions.\n\n"
+    "## In progress\n\n## Decisions and preferences\n\n## To remember\n")
+NOTEBOOK_PROMPT = (
+    "Your notebook is {nb}: your own working notes, kept across cleared chats and new sessions, and sent "
+    "with every message (below). Keep it current yourself with Edit: what is in progress and where it stands, "
+    "decisions made, what the owner asked you to keep in mind, follow-ups. Update it when something worth "
+    "carrying forward happens (not for every message), keep it short and tidy (under ~150 lines), and rewrite "
+    "or remove stale entries instead of piling up. Lasting facts about the owner or the machine still go to "
+    "your memory files as usual. Every exchange is also logged automatically in {jr}/YYYY-MM.md; when the owner "
+    "refers to something earlier that isn't in your context, search it (Grep) before saying you don't know. "
+    "The owner doesn't need to manage any of this.")
+
+
+def notebook():
+    try:
+        t = NOTEBOOK.read_text()
+    except OSError:
+        NOTES.mkdir(parents=True, exist_ok=True)
+        NOTEBOOK.write_text(NOTEBOOK_SEED)
+        t = NOTEBOOK_SEED
+    if len(t) > NOTEBOOK_MAX:
+        t = t[:NOTEBOOK_MAX] + "\n[... notebook cut here: it is too long, tidy it up]"
+    return (NOTEBOOK_PROMPT.format(nb=NOTEBOOK, jr=JOURNAL)
+            + "\n\n<notebook>\n" + t.strip() + "\n</notebook>")
+
+
+def journal_add(prompt, answer, tools):
+    """Append one exchange to this month's journal."""
+    try:
+        JOURNAL.mkdir(parents=True, exist_ok=True)
+        clip = lambda x, n: x if len(x) <= n else x[:n] + " [...]"
+        entry = f"\n## {time.strftime('%Y-%m-%d %H:%M')}\n\nOwner: {clip(prompt.strip(), 2000)}\n\n"
+        if tools:
+            entry += "Tools: " + "; ".join(clip(t, 120) for t in tools[:15]) + ("; ..." if len(tools) > 15 else "") + "\n\n"
+        entry += f"Claude: {clip(answer.strip(), 4000)}\n"
+        with open(JOURNAL / time.strftime("%Y-%m.md"), "a") as f:
+            f.write(entry)
+    except OSError:
+        pass
+
+
+def journal_tail(n=8000):
+    """The end of the journal (this month, else last month), for a fresh session."""
+    try:
+        files = sorted(JOURNAL.glob("*.md"))
+    except OSError:
+        return ""
+    t = ""
+    for f in reversed(files[-2:]):
+        t = f.read_text() + t
+        if len(t) >= n:
+            break
+    if len(t) > n:
+        t = t[-n:]
+        t = t[t.find("\n## ") + 1:] if "\n## " in t else t
+    return t.strip()
+
+
+def session_ok(sid):
+    if not sid:
+        return False
+    f = HOME / ".claude/projects" / str(WORKDIR).replace("/", "-") / f"{sid}.jsonl"
+    try:
+        return f.stat().st_size < SESSION_MAX
+    except OSError:
+        return False
+
+
 PROFILE = CACHE / "system-profile.md"       # sysprofile.py: hardware, OS, services + the owner's notes
 PROFILE_MAX_AGE = 6 * 3600
 
@@ -69,7 +155,9 @@ def profile():
         return PROFILE.read_text()
     except OSError:
         return ""
-ALLOWED = ["WebSearch", "WebFetch", "Read", "Glob", "Grep"]
+ALLOWED = ["WebSearch", "WebFetch", "Read", "Glob", "Grep",
+           "Edit(~/.local/share/panacea-claude/notebook/notebook.md)",   # its own notebook: no card
+           "Write(~/.local/share/panacea-claude/notebook/notebook.md)"]
 DENIED = [f"Read({p})" for p in ("~/.ssh/**", "~/.gnupg/**", "~/.local/share/keyrings/**",
                                  "~/.config/panacea-claude/**", "~/.config/proton*/**",
                                  "~/.local/share/proton*/**", "~/.local/share/panacea/vault*")]
@@ -397,21 +485,20 @@ def ask_claude(messages, model):
         raise ValueError("last message is not from the user")
     prompt = text_of(last.get("content"))
 
-    # Continue the same Claude Code session if the panel's previous assistant
-    # message is the reply we gave last time; otherwise start fresh and pass
-    # the visible history along as context.
+    # One continuous session, whatever the chat shows (clearing it only clears the view).
+    # A new one only when there is none yet, or it got too big: then it starts with the
+    # end of the journal, and the notebook (always sent) carries the rest.
     st = load_state()
-    prev = messages[-2] if len(messages) >= 2 else None
-    resume = None
-    if prev and prev.get("role") == "assistant" and st.get("last_reply") == text_of(prev.get("content")):
-        resume = st.get("session_id")
-    elif len(messages) > 1 and not prompt.lstrip().startswith("/"):   # a /command goes as it is
-        hist = "\n\n".join(f"{m['role']}: {text_of(m.get('content'))}" for m in messages[:-1])
-        prompt = f"(Earlier in this chat:)\n{hist}\n\n(New message:)\n{prompt}"
+    resume = st.get("session_id") if session_ok(st.get("session_id")) else None
+    if not resume and not prompt.lstrip().startswith("/"):   # a /command goes as it is
+        tail = journal_tail()
+        if tail:
+            prompt = (f"(A new session. The end of your journal, for context:)\n{tail}\n\n"
+                      f"(New message:)\n{prompt}")
 
     mcp, allowed, ask, denied, extra = run_config()
     cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
-           "--append-system-prompt", SYSTEM + ("\n\n" + extra if extra else "") + "\n\n" + profile(),
+           "--append-system-prompt", SYSTEM + ("\n\n" + extra if extra else "") + "\n\n" + notebook() + "\n\n" + profile(),
            "--mcp-config", mcp, "--strict-mcp-config",
            "--permission-mode", "auto", "--settings", json.dumps({"permissions": {"ask": ask}}),
            "--permission-prompt-tool", "mcp__panacea__approve",
@@ -544,6 +631,9 @@ class Handler(BaseHTTPRequestHandler):
         # so nothing changes when it finishes (the last remark is usually the reply itself,
         # so it's left out)
         timeline = [st for st in STEPS if st.get("k") in ("text", "tool", "card")]
+        if msgs and not str(answer).startswith("Claude bridge error"):
+            journal_add(text_of(msgs[-1].get("content")), answer,
+                        [st.get("t", "") for st in STEPS if st.get("k") == "tool"])
         if timeline and timeline[-1].get("k") == "text" and answer.strip().startswith(timeline[-1]["t"][:200]):
             timeline.pop()
         write_live({"busy": False, "steps": [],
