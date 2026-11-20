@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v36"
+VERSION = "v38"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -114,6 +114,7 @@ STEP_QML = r'''import QtQuick
 Item {
     id: st
     property var sys
+    readonly property var t: sys.pk   // the ui kit's tokens (DESIGN.md)
     property real boxR: 20
     property real rInner: 14
     property string kind: ""          // text | tool | ask | card
@@ -166,15 +167,14 @@ Item {
         Item {
             id: toolRow
             width: parent.width; height: Math.max(20, toolLabel.implicitHeight + 4)
-            Text {
+            PkIcon {
                 id: chev
-                width: 12; anchors.verticalCenter: parent.verticalCenter
-                horizontalAlignment: Text.AlignHCenter
-                text: "›"; color: toolMa.containsMouse ? st.sys.colFg : st.sys.colMuted
+                sys: st.sys; name: "caret-right"; size: st.t.iXs - 2
+                anchors.verticalCenter: parent.verticalCenter
+                color: toolMa.containsMouse ? st.t.fg : st.t.muted
                 opacity: st.canOpen ? 1 : 0.4
-                font.pixelSize: 14
                 rotation: st.open ? 90 : 0
-                Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                Behavior on rotation { NumberAnimation { duration: st.t.dBase; easing.type: Easing.OutCubic } }
             }
             Text {
                 id: toolLabel
@@ -182,9 +182,9 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 elide: Text.ElideRight; maximumLineCount: 1; textFormat: Text.PlainText
                 text: st.text
-                color: toolMa.containsMouse && st.canOpen ? st.sys.colFg : st.sys.colMuted
-                Behavior on color { ColorAnimation { duration: 120 } }
-                font.pixelSize: 12
+                color: toolMa.containsMouse && st.canOpen ? st.t.fg : st.t.muted
+                Behavior on color { ColorAnimation { duration: st.t.dFast } }
+                font { family: st.t.font; pixelSize: st.t.tLabel }
             }
             Item {
                 id: mark
@@ -192,16 +192,16 @@ Item {
                 width: 14; height: 14
                 Rectangle {   // still running: a soft pulse
                     anchors.centerIn: parent; width: 6; height: 6; radius: 3
-                    color: st.sys.colFg; visible: st.running
+                    color: st.t.fg; visible: st.running
                     SequentialAnimation on opacity {
                         running: st.running; loops: Animation.Infinite
                         NumberAnimation { to: 0.2; duration: 650; easing.type: Easing.InOutSine }
                         NumberAnimation { to: 1; duration: 650; easing.type: Easing.InOutSine }
                     }
                 }
-                Text {
+                PkIcon {
                     anchors.centerIn: parent; visible: st.failed && !st.running
-                    text: "!"; color: st.sys.colCrit; font { pixelSize: 12; bold: true }
+                    sys: st.sys; name: "warning"; size: st.t.iXs; color: st.t.accentText
                 }
             }
             MouseArea {
@@ -217,30 +217,26 @@ Item {
             x: 18; y: toolRow.height + 6
             width: parent.width - x; height: boxCol.implicitHeight + 18
             visible: st.open
-            radius: Math.max(6, st.rInner - 4)
-            color: Qt.rgba(0, 0, 0, 0.45)
+            radius: st.t.rSmall
+            color: st.t.scrim
             Column {
                 id: boxCol
-                x: 11; y: 9; width: parent.width - 22; spacing: 8
+                x: st.t.s3; y: 9; width: parent.width - 2 * st.t.s3; spacing: st.t.s3   // no divider: space apart
                 TextEdit {
                     visible: st.detail.length > 0
                     width: parent.width; readOnly: true; selectByMouse: true
                     wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
-                    text: st.detail; color: st.sys.colFg
-                    selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: st.sys.colFg
-                    font { family: st.sys.fontFam; pixelSize: 11 }
-                }
-                Rectangle {
-                    visible: st.detail.length > 0 && st.output.length > 0
-                    width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.08)
+                    text: st.detail; color: st.t.fg
+                    selectionColor: st.t.pressed; selectedTextColor: st.t.fg
+                    font { family: st.t.font; pixelSize: st.t.tCaption }
                 }
                 TextEdit {
                     visible: st.output.length > 0
                     width: parent.width; readOnly: true; selectByMouse: true
                     wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
-                    text: st.output; color: st.failed ? st.sys.colCrit : st.sys.colMuted
-                    selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: st.sys.colFg
-                    font { family: st.sys.fontFam; pixelSize: 11 }
+                    text: st.output; color: st.failed ? st.t.accentText : st.t.muted
+                    selectionColor: st.t.pressed; selectedTextColor: st.t.fg
+                    font { family: st.t.font; pixelSize: st.t.tCaption }
                 }
             }
         }
@@ -254,7 +250,7 @@ Item {
         width: st.width; height: card.height
         PanaceaClaudeCard {
             id: card
-            width: parent.width; sys: st.sys; radius: Math.max(11, st.rInner)
+            width: parent.width; sys: st.sys
             open: st.open; hovered: cardMa.containsMouse && st.canOpen
             card: ({ title: st.cardTitle, body: st.cardBody, decision: st.outcome, ok: st.worked })
         }
@@ -267,56 +263,49 @@ Item {
         }
     }
 
+    // an approval card, in the kit: a surface, the pixel Claude, the command sunk in a scrim,
+    // Deny (secondary) and Allow (primary) pills; then, same height, what you chose
     Rectangle {
         id: ask
         y: st.gap
         visible: st.kind === "ask"
-        width: st.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 28; radius: st.boxR
-        color: Qt.rgba(1, 1, 1, 0.06)
-        PanaceaClaudeCritter { id: apCritter; x: 14; y: 12; px: 3; mood: st.answer === "" ? "asking" : "working" }
+        width: st.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 2 * st.t.s4; radius: st.t.rSurface
+        color: st.t.surface
+        PanaceaClaudeCritter { id: apCritter; x: st.t.s4; y: st.t.s4 - 2; px: 3; mood: st.answer === "" ? "asking" : "working" }
         Column {
-            id: apCol; x: apCritter.x + apCritter.width + 14; y: 14; width: parent.width - x - 14; spacing: 9
+            id: apCol; x: apCritter.x + apCritter.width + st.t.s4; y: st.t.s4; width: parent.width - x - st.t.s4; spacing: st.t.s2
             Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
                    text: "Claude wants to " + st.cardTitle.toLowerCase()
-                   color: st.sys.colFg; font { pixelSize: 13; bold: true; family: st.sys.fontBody } }
+                   color: st.t.fg; font { family: st.t.font; pixelSize: st.t.tEmph; weight: Font.DemiBold } }
             Text { visible: text.length > 0; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
-                   text: st.reason; color: st.sys.colMuted; font.pixelSize: 12 }
+                   text: st.reason; color: st.t.soft; font { family: st.t.font; pixelSize: st.t.tLabel } }
             Rectangle {
-                width: parent.width; height: apBody.implicitHeight + 16; radius: st.rInner - 4
-                color: Qt.rgba(0, 0, 0, 0.5)
-                Text { id: apBody; x: 10; y: 8; width: parent.width - 20; wrapMode: Text.WrapAnywhere
+                width: parent.width; height: apBody.implicitHeight + 2 * st.t.s2 + 2; radius: st.t.rSmall
+                color: st.t.scrim
+                Text { id: apBody; x: st.t.s3; y: st.t.s2 + 1; width: parent.width - 2 * st.t.s3; wrapMode: Text.WrapAnywhere
                        textFormat: Text.PlainText; maximumLineCount: 10; elide: Text.ElideRight
-                       text: st.cardBody; color: st.sys.colFg; font { family: st.sys.fontFam; pixelSize: 11 } }
+                       text: st.cardBody; color: st.t.fg; font { family: st.t.font; pixelSize: st.t.tCaption } }
             }
-            // the buttons, then (same height, so nothing jumps) what you chose
             Item {
-                width: parent.width; height: 30
+                width: parent.width; height: 28 + st.t.s1
                 Row {
-                    anchors.right: parent.right; spacing: 8
+                    anchors.right: parent.right; anchors.bottom: parent.bottom; spacing: st.t.s2
                     opacity: st.answer === "" ? 1 : 0; visible: opacity > 0
-                    Behavior on opacity { NumberAnimation { duration: 160 } }
-                    Repeater {
-                        model: [{ t: "Deny", c: "deny" }, { t: "Allow", c: "allow" }]
-                        delegate: Rectangle {
-                            required property var modelData
-                            width: 86; height: 30; radius: st.rInner
-                            color: modelData.c === "allow" ? (apMa.pressed ? Qt.rgba(1, 1, 1, 0.8) : st.sys.colFg)
-                                   : (apMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.08))
-                            Behavior on color { ColorAnimation { duration: 120 } }
-                            Text { anchors.centerIn: parent; text: modelData.t
-                                   color: modelData.c === "allow" ? st.sys.colBg : st.sys.colFg
-                                   font { pixelSize: 12; bold: modelData.c === "allow" } }
-                            MouseArea { id: apMa; anchors.fill: parent; hoverEnabled: true; enabled: st.answer === ""
-                                        cursorShape: Qt.PointingHandCursor; onClicked: st.chosen(modelData.c) }
-                        }
-                    }
+                    Behavior on opacity { NumberAnimation { duration: st.t.dBase } }
+                    PkButton { sys: st.sys; small: true; kind: "secondary"; text: "Deny"; width: 80
+                               enabled: st.answer === ""; onClicked: st.chosen("deny") }
+                    PkButton { sys: st.sys; small: true; kind: "primary"; text: "Allow"; width: 80
+                               enabled: st.answer === ""; onClicked: st.chosen("allow") }
                 }
-                Text {
-                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                Row {
+                    anchors.right: parent.right; anchors.bottom: parent.bottom; height: 28; spacing: st.t.s1 + 2
                     opacity: st.answer === "" ? 0 : 1
-                    Behavior on opacity { NumberAnimation { duration: 200 } }
-                    text: st.answer === "allow" ? "Allowed · running" : "Denied"
-                    color: st.sys.colMuted; font { pixelSize: 12; family: st.sys.fontBody }
+                    Behavior on opacity { NumberAnimation { duration: st.t.dBase } }
+                    PkIcon { sys: st.sys; anchors.verticalCenter: parent.verticalCenter; size: st.t.iXs
+                             name: st.answer === "allow" ? "check" : "x"; color: st.t.muted }
+                    Text { anchors.verticalCenter: parent.verticalCenter
+                           text: st.answer === "allow" ? "Allowed · running" : "Denied"
+                           color: st.t.muted; font { family: st.t.font; pixelSize: st.t.tLabel } }
                 }
             }
         }
@@ -328,43 +317,44 @@ CARD_QML = r'''import QtQuick
 
 // written by chat-patch.py (panacea-claude-bridge)
 // a finished approval: what ran, and whether it worked. One line; opened (the step
-// handles the click) it shows the whole command.
+// handles the click) it shows the whole command. Kit look: a surface at rControl, a bare
+// Phosphor mark (check / warning / x, never in a circle), the state as a caption.
 Rectangle {
     property var sys
+    readonly property var t: sys.pk
     id: cr
     property var card: ({})
     property bool open: false
     property bool hovered: false
     readonly property string outcome: cr.card.decision === "allow" ? (cr.card.ok ? "done" : "failed")
                                     : cr.card.decision === "deny" ? "denied" : "unanswered"
-    height: crRow.implicitHeight + 18; radius: 11
-    color: hovered ? Qt.rgba(1, 1, 1, 0.085) : Qt.rgba(1, 1, 1, 0.055)
-    Behavior on color { ColorAnimation { duration: 120 } }
+    height: crRow.implicitHeight + 2 * t.s3; radius: t.rControl
+    color: hovered ? t.selected : t.surface
+    Behavior on color { ColorAnimation { duration: cr.t.dFast } }
     Row {
-        id: crRow; x: 12; y: 9; width: parent.width - 24; spacing: 10
-        Rectangle {
-            id: crDot
-            width: 18; height: 18; radius: 9; y: 0
-            color: cr.outcome === "done" ? sys.colFg : cr.outcome === "failed" ? sys.colCrit : Qt.rgba(1, 1, 1, 0.1)
-            Text { anchors.centerIn: parent; text: cr.outcome === "done" ? "✓" : cr.outcome === "failed" ? "!" : "×"
-                   color: cr.outcome === "done" ? sys.colBg : cr.outcome === "failed" ? "#ffffff" : sys.colMuted
-                   font { pixelSize: 11; bold: true } }
+        id: crRow; x: cr.t.s3; y: cr.t.s3; width: parent.width - 2 * cr.t.s3; spacing: cr.t.s3 - 2
+        PkIcon {
+            id: crMark
+            sys: cr.sys; y: 0; size: cr.t.iSm
+            name: cr.outcome === "done" ? "check" : cr.outcome === "failed" ? "warning" : "x"
+            color: cr.outcome === "done" ? cr.t.fg : cr.outcome === "failed" ? cr.t.accentText : cr.t.muted
         }
         Column {
-            width: parent.width - 28 - crState.implicitWidth - 10; spacing: 3
+            width: parent.width - crMark.width - crState.implicitWidth - 2 * crRow.spacing; spacing: 3
             Text { width: parent.width; elide: Text.ElideRight; text: String(cr.card.title || "")
-                   color: sys.colFg; font { pixelSize: 12; bold: true; family: sys.fontBody } }
+                   color: cr.t.fg; font { family: cr.t.font; pixelSize: cr.t.tLabel; weight: Font.DemiBold } }
             Text { width: parent.width; textFormat: Text.PlainText
                    visible: text.length > 0
                    text: cr.open ? String(cr.card.body || "") : String(cr.card.body || "").replace(/\s*\n\s*/g, " ")
                    wrapMode: cr.open ? Text.WrapAnywhere : Text.NoWrap
                    elide: cr.open ? Text.ElideNone : Text.ElideRight
                    maximumLineCount: cr.open ? 16 : 1
-                   color: sys.colMuted; font { family: sys.fontFam; pixelSize: 11 } }
+                   color: cr.t.muted; font { family: cr.t.font; pixelSize: cr.t.tCaption } }
         }
         Text { id: crState; y: 2
                text: ({ done: "Done", failed: "Failed", denied: "Denied", unanswered: "No answer" })[cr.outcome]
-               color: cr.outcome === "failed" ? sys.colCrit : sys.colMuted; font.pixelSize: 11 }
+               color: cr.outcome === "failed" ? cr.t.accentText : cr.t.muted
+               font { family: cr.t.font; pixelSize: cr.t.tCaption } }
     }
 }
 '''
@@ -1051,7 +1041,15 @@ UX2 = [
         function onIslandChatMessagesChanged() { if (!view.restoring) chatStore.setText(JSON.stringify(view.sys.islandChatMessages)); } }
 """, """    Connections { target: view.sys
         function onIslandChatMessagesChanged() {
-            if (!view.restoring) chatStore.setText(JSON.stringify(view.sys.islandChatMessages.slice(-400)));
+            // auto-clear (v37): once a reply lands and the chat holds more than 8 messages, only
+            // the last exchange stays on screen - a long chat made the page stutter. Claude keeps
+            // its session, notebook and journal; this only trims the view.
+            var m = view.sys.islandChatMessages;
+            if (!view.restoring && m.length > 8 && m[m.length - 1].role === "assistant") {
+                view.sys.islandChatMessages = m.slice(-2);
+                return;
+            }
+            if (!view.restoring) chatStore.setText(JSON.stringify(m.slice(-400)));
             view.syncMsgs();
         } }
     // """ + TAG + """: the conversation on screen is a window on its last messages, kept in a
@@ -1262,8 +1260,75 @@ def patch_chat_py():
     os.chmod(CHAT_PY, 0o755)
 
 
+# Attachments: Panacea's chat.py takes images and UTF-8 text only (5 MB each), and its errors are
+# Russian. Here any file goes: images up to 5 MB as images, small text files inline (with their
+# path), everything else - video, PDF, archives, any size - as its path, type and size, which
+# Claude opens itself (the bridge runs Claude Code). Errors in English.
+CHAT_FILES_MARK = "# panacea-claude: any file type"
+CHAT_FILES_OLD = """    paths = request.get('files', [])
+    if paths and messages:
+        parts = [{'type':'text','text':messages[-1]['content']}]
+        for raw in paths:
+            path = pathlib.Path(raw)
+            if not path.is_file() or path.stat().st_size > 5*1024*1024: raise ValueError('Файл недоступен или больше 5 МБ: '+path.name)
+            data = path.read_bytes(); mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+            if mime.startswith('image/'):
+                parts.append({'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+base64.b64encode(data).decode()}})
+            else:
+                try: text = data.decode('utf-8')
+                except UnicodeDecodeError: raise ValueError('Поддерживаются изображения и текстовые файлы: '+path.name)
+                parts.append({'type':'text','text':'Файл '+path.name+':\\n'+text})
+        messages[-1]['content'] = parts
+"""
+CHAT_FILES_NEW = """    paths = request.get('files', [])
+    if paths and messages:
+        """ + CHAT_FILES_MARK + """: images inline, small text inline, anything else by path
+        def size_of(n):
+            for unit in ('B', 'KB', 'MB', 'GB'):
+                if n < 1024 or unit == 'GB': return (str(n) if unit == 'B' else '%.1f' % n) + ' ' + unit
+                n /= 1024
+        parts = [{'type':'text','text':messages[-1]['content']}]
+        for raw in paths:
+            path = pathlib.Path(raw).expanduser()
+            if not path.is_file(): raise ValueError('File not found: ' + str(path))
+            size = path.stat().st_size; mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+            if mime.startswith('image/') and size <= 5*1024*1024 and mime != 'image/svg+xml':
+                parts.append({'type':'image_url','image_url':{'url':'data:'+mime+';base64,'+base64.b64encode(path.read_bytes()).decode()}})
+                continue
+            text = None
+            if size <= 200*1024:
+                try: text = path.read_bytes().decode('utf-8')
+                except UnicodeDecodeError: text = None
+            if text is not None:
+                parts.append({'type':'text','text':'[Attached file: ' + str(path) + ']\\n' + text})
+            else:
+                parts.append({'type':'text','text':'[Attached file: ' + str(path) + ' (' + mime + ', ' + size_of(size) + ')]'})
+        messages[-1]['content'] = parts
+"""
+CHAT_TEXTS = [("'Укажите адрес API и модель в настройках лаунчера'", "'Set the API address and model in the launcher settings'")]
+
+
+def patch_chat_files():
+    try:
+        s = read(CHAT_PY)
+    except OSError:
+        return
+    t = s
+    if CHAT_FILES_MARK not in t:
+        if t.count(CHAT_FILES_OLD) != 1:
+            print("chat-patch: chat.py attachment anchor not found - only images and text attach", file=sys.stderr)
+        else:
+            t = t.replace(CHAT_FILES_OLD, CHAT_FILES_NEW)
+    for old, new in CHAT_TEXTS:
+        t = t.replace(old, new)
+    if t != s:
+        write_atomic(CHAT_PY, t)
+        os.chmod(CHAT_PY, 0o755)
+
+
 def main() -> int:
     patch_chat_py()
+    patch_chat_files()
     try:
         cur = read(QML)
     except OSError as e:
