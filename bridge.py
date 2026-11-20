@@ -302,7 +302,7 @@ def step_of(block):
     if t == "thinking" and block.get("thinking", "").strip():
         return {"k": "think", "t": block["thinking"].strip()[-600:]}
     if t == "text" and block.get("text", "").strip():
-        return {"k": "text", "t": block["text"].strip()[:600]}
+        return {"k": "text", "t": block["text"].strip()[:4000]}
     if t == "tool_use":
         name, inp = block.get("name", ""), block.get("input") or {}
         if name in ("ToolSearch", "TodoWrite"):      # internal bookkeeping, not worth a line
@@ -317,8 +317,43 @@ def step_of(block):
             "Edit": lambda: "Editing " + str(inp.get("file_path", "")),
             "Write": lambda: "Writing " + str(inp.get("file_path", "")),
         }.get(name, lambda: FX_LABELS.get(name.removeprefix(FX), lambda i: "")(inp) or "Using " + name)()
-        return {"k": "tool", "t": label[:300], "id": block.get("id", "")}
+        # "d": what it ran, shown when the line is opened in the chat; "done" once its result is in
+        return {"k": "tool", "t": label[:300], "id": block.get("id", ""), "d": detail_of(name, inp), "done": False}
     return None
+
+
+def detail_of(name, inp):
+    """A tool call's input, as you'd want to read it when you open its line in the chat."""
+    s = lambda k: str(inp.get(k) or "")
+    if name == "Bash":
+        d = s("command")
+    elif name == "Edit":
+        d = s("file_path") + "\n- " + s("old_string")[:300] + "\n+ " + s("new_string")[:300]
+    elif name == "Write":
+        d = s("file_path") + "\n" + s("content")[:400]
+    elif name in ("Read", "NotebookEdit"):
+        d = s("file_path")
+    elif name == "WebSearch":
+        d = s("query")
+    elif name == "WebFetch":
+        d = s("url") + ("\n" + s("prompt") if inp.get("prompt") else "")
+    elif name in ("Grep", "Glob"):
+        d = s("pattern") + (" in " + s("path") if inp.get("path") else "")
+    else:
+        try:
+            d = json.dumps(inp, ensure_ascii=False, indent=1)
+        except (TypeError, ValueError):
+            d = str(inp)
+    return d.strip()[:1000]
+
+
+def result_of(block):
+    """A tool result's text, trimmed for the chat."""
+    c = block.get("content")
+    if isinstance(c, list):
+        c = "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    t = str(c or "").strip()
+    return t if len(t) <= 800 else t[:800].rstrip() + "\n…"
 
 
 FX_LABELS = {   # the browser's steps, in words
@@ -414,12 +449,20 @@ def ask_claude(messages, model):
                     st = step_of(block)
                     if st:
                         STEPS.append(st)
-                        del STEPS[:-40]          # in place: live["steps"] is STEPS
+                        del STEPS[:-200]         # in place: live["steps"] is STEPS
                         write_live(live)
             elif ev.get("type") == "user":
                 # tool results: an approval you answered becomes a record of what happened
                 for block in (ev.get("message") or {}).get("content") or []:
                     card = card_of(block) if isinstance(block, dict) else None
+                    if not card and isinstance(block, dict) and block.get("type") == "tool_result":
+                        # any other tool: its result goes on its line (opened in the chat)
+                        tid = block.get("tool_use_id", "")
+                        for st in reversed(live["steps"]):
+                            if st.get("k") == "tool" and st.get("id") == tid:
+                                st.update({"done": True, "out": result_of(block), "err": bool(block.get("is_error"))})
+                                write_live(live)
+                                break
                     if card:
                         CARDS.append(card)
                         live["cards"] = CARDS[-8:]
@@ -496,13 +539,15 @@ class Handler(BaseHTTPRequestHandler):
         # ("at", set by the chat). If the chat page was closed meanwhile (you left
         # it, or answered an approval from the notification), its request died
         # with it; the chat picks the reply up from here when it opens again.
-        # kept with the reply: Claude's in-between remarks and the actions you approved,
-        # in order (the last remark is usually the reply itself, so it's left out)
-        timeline = [st for st in STEPS if st.get("k") in ("text", "card")]
+        # kept with the reply: the whole timeline as the chat showed it while Claude worked -
+        # remarks, the tools it ran (with what they returned) and the actions you approved -
+        # so nothing changes when it finishes (the last remark is usually the reply itself,
+        # so it's left out)
+        timeline = [st for st in STEPS if st.get("k") in ("text", "tool", "card")]
         if timeline and timeline[-1].get("k") == "text" and answer.strip().startswith(timeline[-1]["t"][:200]):
             timeline.pop()
         write_live({"busy": False, "steps": [],
-                    "last": {"at": at, "answer": answer, "cards": CARDS[-8:], "timeline": timeline[-30:]}})
+                    "last": {"at": at, "answer": answer, "cards": CARDS[-8:], "timeline": timeline[-200:]}})
         self.reply(200, {"object": "chat.completion",
                          "choices": [{"index": 0, "finish_reason": "stop",
                                       "message": {"role": "assistant", "content": answer}}]})

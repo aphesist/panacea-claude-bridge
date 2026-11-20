@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v31"
+VERSION = "v32"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -103,13 +103,355 @@ LIVE_PROPS = '    property bool busy: false\n    // The conversation outlives th
 LIVE_BLOCK = '                // what Claude is doing right now: one timeline, then the pixel Claude at the bottom\n                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 10\n                    Repeater {\n                        model: timelineModel\n                        delegate: PanaceaClaudeStep {\n                            required property string k; required property string t; required property string title\n                            required property string body; required property string why; required property string decision\n                            required property bool ok; required property string answered\n                            width: parent.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                            kind: k; text: t; cardTitle: title; cardBody: body; reason: why; outcome: decision; worked: ok; answer: answered\n                            animateIn: true\n                            onChosen: c => view.answerApproval(c)\n                        }\n                    }\n                    Row {\n                        spacing: 10\n                        PanaceaClaudeCritter { px: 2; mood: view.statusMood; anchors.verticalCenter: parent.verticalCenter }\n                        Text { text: ({ thinking: "Thinking", working: "Working", waiting: "Waiting for you" })[view.statusMood]\n                               anchors.verticalCenter: parent.verticalCenter\n                               color: view.sys.colMuted; font { pixelSize: 12; family: view.sys.fontBody } }\n                    }\n                }\n'
 MASCOT = '        // the pixel Claude, idle\n        PanaceaClaudeCritter { anchors.horizontalCenter: parent.horizontalCenter; px: 6; mood: "idle" }\n'
 
+STEP_QML = r'''import QtQuick
+
+// written by chat-patch.py (panacea-claude-bridge)
+// One line of Claude's timeline: a remark, a tool it ran, an approval card (then
+// "Allowed - running" once answered), or the outcome of an approved action.
+// The same rows show while Claude works and after it finishes, so nothing reflows.
+// A tool line opens (click) to what it ran and what came back; a card opens to its
+// full command. Changing kind (ask -> card) happens in place, the height easing.
+Item {
+    id: st
+    property var sys
+    property real boxR: 20
+    property real rInner: 14
+    property string kind: ""          // text | tool | ask | card
+    property string prevKind: ""      // the row above: sets the gap (tools sit close together)
+    property string text: ""
+    property string detail: ""        // tool: what it ran (command, path, query...)
+    property string output: ""        // tool: what came back, trimmed
+    property bool failed: false       // tool: it returned an error
+    property bool running: false      // tool: no result yet
+    property string cardTitle: ""
+    property string cardBody: ""
+    property string reason: ""
+    property string outcome: ""       // allow | deny (card)
+    property bool worked: false
+    property string answer: ""        // ask: "" while waiting, then allow | deny
+    property bool animateIn: false
+    signal chosen(string choice)
+
+    property bool open: false
+    readonly property bool canOpen: kind === "tool" ? (detail.length > 0 || output.length > 0)
+                                  : kind === "card" ? cardBody.length > 0 : false
+    readonly property real gap: prevKind === "" ? 0 : (kind === "tool" && prevKind === "tool") ? 2 : 12
+    readonly property Item shown: kind === "card" ? cardWrap : kind === "ask" ? ask : kind === "tool" ? tool : line
+    implicitHeight: gap + shown.height
+    height: implicitHeight
+    clip: true
+    Behavior on height { enabled: st.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+    property bool ready: false
+    opacity: animateIn ? 0 : 1
+    Component.onCompleted: { if (animateIn) opacity = 1; ready = true; }
+    Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+
+    // a remark: plain text, like the reply itself
+    Text {
+        id: line
+        y: st.gap
+        visible: st.kind === "text"
+        width: st.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+        text: st.text
+        color: st.sys.colFg
+        font.pixelSize: 13
+        lineHeight: 1.15
+    }
+
+    // a tool: one quiet line with a chevron; opens to the command and its output
+    Item {
+        id: tool
+        y: st.gap
+        visible: st.kind === "tool"
+        width: st.width
+        height: toolRow.height + (st.open ? toolBox.height + 6 : 0)
+        Item {
+            id: toolRow
+            width: parent.width; height: Math.max(20, toolLabel.implicitHeight + 4)
+            Text {
+                id: chev
+                width: 12; anchors.verticalCenter: parent.verticalCenter
+                horizontalAlignment: Text.AlignHCenter
+                text: "›"; color: toolMa.containsMouse ? st.sys.colFg : st.sys.colMuted
+                opacity: st.canOpen ? 1 : 0.4
+                font.pixelSize: 14
+                rotation: st.open ? 90 : 0
+                Behavior on rotation { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            }
+            Text {
+                id: toolLabel
+                x: 18; width: parent.width - x - mark.width - 6
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight; maximumLineCount: 1; textFormat: Text.PlainText
+                text: st.text
+                color: toolMa.containsMouse && st.canOpen ? st.sys.colFg : st.sys.colMuted
+                Behavior on color { ColorAnimation { duration: 120 } }
+                font.pixelSize: 12
+            }
+            Item {
+                id: mark
+                anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                width: 14; height: 14
+                Rectangle {   // still running: a soft pulse
+                    anchors.centerIn: parent; width: 6; height: 6; radius: 3
+                    color: st.sys.colFg; visible: st.running
+                    SequentialAnimation on opacity {
+                        running: st.running; loops: Animation.Infinite
+                        NumberAnimation { to: 0.2; duration: 650; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 1; duration: 650; easing.type: Easing.InOutSine }
+                    }
+                }
+                Text {
+                    anchors.centerIn: parent; visible: st.failed && !st.running
+                    text: "!"; color: st.sys.colCrit; font { pixelSize: 12; bold: true }
+                }
+            }
+            MouseArea {
+                id: toolMa
+                anchors.fill: parent; hoverEnabled: true
+                enabled: st.canOpen
+                cursorShape: st.canOpen ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: st.open = !st.open
+            }
+        }
+        Rectangle {
+            id: toolBox
+            x: 18; y: toolRow.height + 6
+            width: parent.width - x; height: boxCol.implicitHeight + 18
+            visible: st.open
+            radius: Math.max(6, st.rInner - 4)
+            color: Qt.rgba(0, 0, 0, 0.45)
+            Column {
+                id: boxCol
+                x: 11; y: 9; width: parent.width - 22; spacing: 8
+                TextEdit {
+                    visible: st.detail.length > 0
+                    width: parent.width; readOnly: true; selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
+                    text: st.detail; color: st.sys.colFg
+                    selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: st.sys.colFg
+                    font { family: st.sys.fontFam; pixelSize: 11 }
+                }
+                Rectangle {
+                    visible: st.detail.length > 0 && st.output.length > 0
+                    width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.08)
+                }
+                TextEdit {
+                    visible: st.output.length > 0
+                    width: parent.width; readOnly: true; selectByMouse: true
+                    wrapMode: TextEdit.WrapAnywhere; textFormat: TextEdit.PlainText
+                    text: st.output; color: st.failed ? st.sys.colCrit : st.sys.colMuted
+                    selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: st.sys.colFg
+                    font { family: st.sys.fontFam; pixelSize: 11 }
+                }
+            }
+        }
+    }
+
+    // an approved action and how it went: a compact card, opens to the full command
+    Item {
+        id: cardWrap
+        y: st.gap
+        visible: st.kind === "card"
+        width: st.width; height: card.height
+        PanaceaClaudeCard {
+            id: card
+            width: parent.width; sys: st.sys; radius: Math.max(11, st.rInner)
+            open: st.open; hovered: cardMa.containsMouse && st.canOpen
+            card: ({ title: st.cardTitle, body: st.cardBody, decision: st.outcome, ok: st.worked })
+        }
+        MouseArea {
+            id: cardMa
+            anchors.fill: parent; hoverEnabled: true
+            enabled: st.canOpen
+            cursorShape: st.canOpen ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: st.open = !st.open
+        }
+    }
+
+    Rectangle {
+        id: ask
+        y: st.gap
+        visible: st.kind === "ask"
+        width: st.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 28; radius: st.boxR
+        color: Qt.rgba(1, 1, 1, 0.06)
+        PanaceaClaudeCritter { id: apCritter; x: 14; y: 12; px: 3; mood: st.answer === "" ? "asking" : "working" }
+        Column {
+            id: apCol; x: apCritter.x + apCritter.width + 14; y: 14; width: parent.width - x - 14; spacing: 9
+            Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                   text: "Claude wants to " + st.cardTitle.toLowerCase()
+                   color: st.sys.colFg; font { pixelSize: 13; bold: true; family: st.sys.fontBody } }
+            Text { visible: text.length > 0; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText
+                   text: st.reason; color: st.sys.colMuted; font.pixelSize: 12 }
+            Rectangle {
+                width: parent.width; height: apBody.implicitHeight + 16; radius: st.rInner - 4
+                color: Qt.rgba(0, 0, 0, 0.5)
+                Text { id: apBody; x: 10; y: 8; width: parent.width - 20; wrapMode: Text.WrapAnywhere
+                       textFormat: Text.PlainText; maximumLineCount: 10; elide: Text.ElideRight
+                       text: st.cardBody; color: st.sys.colFg; font { family: st.sys.fontFam; pixelSize: 11 } }
+            }
+            // the buttons, then (same height, so nothing jumps) what you chose
+            Item {
+                width: parent.width; height: 30
+                Row {
+                    anchors.right: parent.right; spacing: 8
+                    opacity: st.answer === "" ? 1 : 0; visible: opacity > 0
+                    Behavior on opacity { NumberAnimation { duration: 160 } }
+                    Repeater {
+                        model: [{ t: "Deny", c: "deny" }, { t: "Allow", c: "allow" }]
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: 86; height: 30; radius: st.rInner
+                            color: modelData.c === "allow" ? (apMa.pressed ? Qt.rgba(1, 1, 1, 0.8) : st.sys.colFg)
+                                   : (apMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.08))
+                            Behavior on color { ColorAnimation { duration: 120 } }
+                            Text { anchors.centerIn: parent; text: modelData.t
+                                   color: modelData.c === "allow" ? st.sys.colBg : st.sys.colFg
+                                   font { pixelSize: 12; bold: modelData.c === "allow" } }
+                            MouseArea { id: apMa; anchors.fill: parent; hoverEnabled: true; enabled: st.answer === ""
+                                        cursorShape: Qt.PointingHandCursor; onClicked: st.chosen(modelData.c) }
+                        }
+                    }
+                }
+                Text {
+                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                    opacity: st.answer === "" ? 0 : 1
+                    Behavior on opacity { NumberAnimation { duration: 200 } }
+                    text: st.answer === "allow" ? "Allowed · running" : "Denied"
+                    color: st.sys.colMuted; font { pixelSize: 12; family: st.sys.fontBody }
+                }
+            }
+        }
+    }
+}
+'''
+
+CARD_QML = r'''import QtQuick
+
+// written by chat-patch.py (panacea-claude-bridge)
+// a finished approval: what ran, and whether it worked. One line; opened (the step
+// handles the click) it shows the whole command.
+Rectangle {
+    property var sys
+    id: cr
+    property var card: ({})
+    property bool open: false
+    property bool hovered: false
+    readonly property string outcome: cr.card.decision === "allow" ? (cr.card.ok ? "done" : "failed")
+                                    : cr.card.decision === "deny" ? "denied" : "unanswered"
+    height: crRow.implicitHeight + 18; radius: 11
+    color: hovered ? Qt.rgba(1, 1, 1, 0.085) : Qt.rgba(1, 1, 1, 0.055)
+    Behavior on color { ColorAnimation { duration: 120 } }
+    Row {
+        id: crRow; x: 12; y: 9; width: parent.width - 24; spacing: 10
+        Rectangle {
+            id: crDot
+            width: 18; height: 18; radius: 9; y: 0
+            color: cr.outcome === "done" ? sys.colFg : cr.outcome === "failed" ? sys.colCrit : Qt.rgba(1, 1, 1, 0.1)
+            Text { anchors.centerIn: parent; text: cr.outcome === "done" ? "✓" : cr.outcome === "failed" ? "!" : "×"
+                   color: cr.outcome === "done" ? sys.colBg : cr.outcome === "failed" ? "#ffffff" : sys.colMuted
+                   font { pixelSize: 11; bold: true } }
+        }
+        Column {
+            width: parent.width - 28 - crState.implicitWidth - 10; spacing: 3
+            Text { width: parent.width; elide: Text.ElideRight; text: String(cr.card.title || "")
+                   color: sys.colFg; font { pixelSize: 12; bold: true; family: sys.fontBody } }
+            Text { width: parent.width; textFormat: Text.PlainText
+                   visible: text.length > 0
+                   text: cr.open ? String(cr.card.body || "") : String(cr.card.body || "").replace(/\s*\n\s*/g, " ")
+                   wrapMode: cr.open ? Text.WrapAnywhere : Text.NoWrap
+                   elide: cr.open ? Text.ElideNone : Text.ElideRight
+                   maximumLineCount: cr.open ? 16 : 1
+                   color: sys.colMuted; font { family: sys.fontFam; pixelSize: 11 } }
+        }
+        Text { id: crState; y: 2
+               text: ({ done: "Done", failed: "Failed", denied: "Denied", unanswered: "No answer" })[cr.outcome]
+               color: cr.outcome === "failed" ? sys.colCrit : sys.colMuted; font.pixelSize: 11 }
+    }
+}
+'''
+
+FILE_QML = r'''import QtQuick
+import QtQuick.Effects
+
+// written by chat-patch.py (panacea-claude-bridge)
+// A file in the chat: a picture as a rounded thumbnail, anything else as a chip with
+// its name. Click opens it; in the message box it has its own x to take it back out.
+Item {
+    id: f
+    property var sys
+    property string path: ""
+    property bool removable: false
+    property real r: 10
+    signal removed()
+    readonly property bool image: /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(path)
+    readonly property string name: path.replace(/^.*\//, "")
+    width: image ? 72 : Math.min(240, chip.implicitWidth)
+    height: image ? 72 : 34
+
+    Item {
+        visible: f.image
+        anchors.fill: parent
+        Image {
+            id: img
+            anchors.fill: parent
+            source: f.image ? "file://" + f.path : ""
+            fillMode: Image.PreserveAspectCrop
+            sourceSize: Qt.size(144, 144)
+            asynchronous: true
+            visible: false
+        }
+        Rectangle { id: imgMask; anchors.fill: parent; radius: f.r; visible: false; layer.enabled: true }
+        MultiEffect { anchors.fill: parent; source: img; maskEnabled: true; maskSource: imgMask }
+        Rectangle {   // until it loads (or if it can't)
+            anchors.fill: parent; radius: f.r; color: Qt.rgba(1, 1, 1, 0.06)
+            visible: img.status !== Image.Ready
+        }
+    }
+    Rectangle {
+        id: chip
+        visible: !f.image
+        anchors.fill: parent
+        implicitWidth: chipRow.implicitWidth + 22 + (f.removable ? 18 : 0)
+        radius: f.r
+        color: fileMa.containsMouse ? Qt.rgba(1, 1, 1, 0.11) : Qt.rgba(1, 1, 1, 0.07)
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Row {
+            id: chipRow
+            x: 11; anchors.verticalCenter: parent.verticalCenter; spacing: 7
+            Text { anchors.verticalCenter: parent.verticalCenter; text: String.fromCodePoint(0xF0214)
+                   color: f.sys.colMuted; font { family: f.sys.fontFam; pixelSize: 13 } }
+            Text { anchors.verticalCenter: parent.verticalCenter; text: f.name
+                   width: Math.min(implicitWidth, 170); elide: Text.ElideMiddle; textFormat: Text.PlainText
+                   color: f.sys.colFg; font { pixelSize: 12; family: f.sys.fontBody } }
+        }
+    }
+    MouseArea {
+        id: fileMa
+        anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+        onClicked: Qt.openUrlExternally("file://" + f.path)
+    }
+    // take it back out (message box only)
+    Rectangle {
+        visible: f.removable
+        width: 18; height: 18; radius: 9
+        x: parent.width - width - (f.image ? 4 : 8); y: f.image ? 4 : (parent.height - height) / 2
+        color: xMa.containsMouse ? Qt.rgba(0.15, 0.15, 0.15, 0.95) : Qt.rgba(0, 0, 0, 0.7)
+        Text { anchors.centerIn: parent; text: "×"; color: f.sys.colFg; font.pixelSize: 13 }
+        MouseArea { id: xMa; anchors.fill: parent; anchors.margins: -3; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor; onClicked: f.removed() }
+    }
+}
+'''
+
 # Small QML types used by the patched ChatView, written next to it. (Separate
 # files, not inline components: Quickshell 0.3 refused an inline one as a type.)
 EXTRA = {
-    "PanaceaClaudeStep.qml": 'import QtQuick\n\n// written by chat-patch.py (panacea-claude-bridge)\n// One line of Claude\'s timeline: a remark, a tool it runs, an approval card\n// (then "Allowed - running" once answered), or the outcome of an approved action.\n// Changing kind (ask -> card) happens in place, with the height easing between them.\nItem {\n    id: st\n    property var sys\n    property real boxR: 20\n    property real rInner: 14\n    property string kind: ""          // text | tool | ask | card\n    property string text: ""\n    property string cardTitle: ""\n    property string cardBody: ""\n    property string reason: ""\n    property string outcome: ""       // allow | deny (card)\n    property bool worked: false\n    property string answer: ""        // ask: "" while waiting, then allow | deny\n    property bool animateIn: false\n    signal chosen(string choice)\n\n    readonly property Item shown: kind === "card" ? card : kind === "ask" ? ask : line\n    implicitHeight: shown.height\n    height: implicitHeight\n    clip: true\n    Behavior on height { enabled: st.ready; NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }\n    property bool ready: false\n    opacity: animateIn ? 0 : 1\n    Component.onCompleted: { if (animateIn) opacity = 1; ready = true; }\n    Behavior on opacity { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }\n\n    Text {\n        id: line\n        visible: st.kind === "text" || st.kind === "tool"\n        width: st.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n        maximumLineCount: st.kind === "text" ? 8 : 3; elide: Text.ElideRight\n        text: (st.kind === "tool" ? "›  " : "") + st.text\n        color: st.kind === "text" ? st.sys.colFg : st.sys.colMuted\n        font { pixelSize: st.kind === "text" ? 13 : 12 }\n        lineHeight: 1.15\n    }\n\n    PanaceaClaudeCard {\n        id: card\n        visible: st.kind === "card"\n        width: st.width; sys: st.sys; radius: st.boxR\n        card: ({ title: st.cardTitle, body: st.cardBody, decision: st.outcome, ok: st.worked })\n    }\n\n    Rectangle {\n        id: ask\n        visible: st.kind === "ask"\n        width: st.width; height: Math.max(apCol.implicitHeight, apCritter.height) + 28; radius: st.boxR\n        color: Qt.rgba(1, 1, 1, 0.06)\n        PanaceaClaudeCritter { id: apCritter; x: 14; y: 12; px: 3; mood: st.answer === "" ? "asking" : "working" }\n        Column {\n            id: apCol; x: apCritter.x + apCritter.width + 14; y: 14; width: parent.width - x - 14; spacing: 9\n            Text { width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                   text: "Claude wants to " + st.cardTitle.toLowerCase()\n                   color: st.sys.colFg; font { pixelSize: 13; bold: true; family: st.sys.fontBody } }\n            Text { visible: text.length > 0; width: parent.width; wrapMode: Text.Wrap; textFormat: Text.PlainText\n                   text: st.reason; color: st.sys.colMuted; font.pixelSize: 12 }\n            Rectangle {\n                width: parent.width; height: apBody.implicitHeight + 16; radius: st.rInner - 4\n                color: Qt.rgba(0, 0, 0, 0.5)\n                Text { id: apBody; x: 10; y: 8; width: parent.width - 20; wrapMode: Text.WrapAnywhere\n                       textFormat: Text.PlainText; maximumLineCount: 10; elide: Text.ElideRight\n                       text: st.cardBody; color: st.sys.colFg; font { family: st.sys.fontFam; pixelSize: 11 } }\n            }\n            // the buttons, then (same height, so nothing jumps) what you chose\n            Item {\n                width: parent.width; height: 30\n                Row {\n                    anchors.right: parent.right; spacing: 8\n                    opacity: st.answer === "" ? 1 : 0; visible: opacity > 0\n                    Behavior on opacity { NumberAnimation { duration: 160 } }\n                    Repeater {\n                        model: [{ t: "Deny", c: "deny" }, { t: "Allow", c: "allow" }]\n                        delegate: Rectangle {\n                            required property var modelData\n                            width: 86; height: 30; radius: st.rInner\n                            color: modelData.c === "allow" ? (apMa.pressed ? Qt.rgba(1, 1, 1, 0.8) : st.sys.colFg)\n                                   : (apMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.08))\n                            Behavior on color { ColorAnimation { duration: 120 } }\n                            Text { anchors.centerIn: parent; text: modelData.t\n                                   color: modelData.c === "allow" ? st.sys.colBg : st.sys.colFg\n                                   font { pixelSize: 12; bold: modelData.c === "allow" } }\n                            MouseArea { id: apMa; anchors.fill: parent; hoverEnabled: true; enabled: st.answer === ""\n                                        cursorShape: Qt.PointingHandCursor; onClicked: st.chosen(modelData.c) }\n                        }\n                    }\n                }\n                Text {\n                    anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter\n                    opacity: st.answer === "" ? 0 : 1\n                    Behavior on opacity { NumberAnimation { duration: 200 } }\n                    text: st.answer === "allow" ? "Allowed · running" : "Denied"\n                    color: st.sys.colMuted; font { pixelSize: 12; family: st.sys.fontBody }\n                }\n            }\n        }\n    }\n}\n',
+    "PanaceaClaudeStep.qml": STEP_QML,
     "PanaceaClaudeIcon.qml": 'import QtQuick\nimport QtQuick.Shapes\n\n// written by chat-patch.py (panacea-claude-bridge)\n// Line icons drawn like Panacea\'s own island tab icons (IslandTabIcon.qml):\n// a 20-unit grid, 1.5 strokes, round caps - crisp at any size.\nItem {\n    id: icon\n    property string kind: "attach"     // attach | send | compose\n    property color tint: "white"\n    property real stroke: 1.6\n    implicitWidth: 18; implicitHeight: 18\n    // the path\'s coordinates are scaled, not the item: a scaled Shape blurs its strokes\n    // at fractional display scales, and the stroke width would shrink with it\n    Shape {\n        anchors.fill: parent\n        antialiasing: true\n        preferredRendererType: Shape.CurveRenderer\n        ShapePath {\n            scale: Qt.size(Math.min(icon.width, icon.height) / 20, Math.min(icon.width, icon.height) / 20)\n            fillColor: "transparent"; strokeColor: icon.tint; strokeWidth: icon.stroke\n            capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin\n            PathSvg { path: icon.kind === "send" ? "M 10 15.5 L 10 4.5 M 5.5 9 L 10 4.5 L 14.5 9"\n                          : icon.kind === "compose" ? "M 9.5 3.5 L 5.5 3.5 Q 3.5 3.5 3.5 5.5 L 3.5 14.5 Q 3.5 16.5 5.5 16.5 L 14.5 16.5 Q 16.5 16.5 16.5 14.5 L 16.5 10.5 M 14.4 3.4 Q 15.4 2.4 16.4 3.4 L 16.6 3.6 Q 17.6 4.6 16.6 5.6 L 10.6 11.6 L 7.9 12.1 L 8.4 9.4 Z"\n                          : "M 10 4.5 L 10 15.5 M 4.5 10 L 15.5 10" }\n        }\n    }\n}\n',
     "PanaceaClaudeCritter.qml": 'import QtQuick\n\n// written by chat-patch.py (panacea-claude-bridge)\n// The pixel Claude, with a mood for each state of the chat:\n//   idle      empty chat: a slow walk in place, a gentle bob, blinks\n//   thinking  eyes up, "· · ·" lighting up above its head\n//   working   running a tool: quick steps, eyes focused ahead\n//   waiting   a card needs you: it stops and glances toward it\n//   asking    on the card itself: waves one arm, then the other, with a hop\nItem {\n    id: pc\n    property int px: 3\n    property string mood: "idle"\n    property int frame: 0\n    property bool blink: false\n    readonly property color bodyColor: "#d97757"\n    readonly property color eyeColor: "#141414"\n    readonly property color dotColor: Qt.rgba(1, 1, 1, 0.8)\n    readonly property int interval: ({ idle: 320, thinking: 300, working: 150, waiting: 420, asking: 260 })[mood] || 300\n    // 9 rows: 2 above the head (thought dots), 6 of body, 1 of legs\n    readonly property var grid: build(mood, frame, blink)\n    readonly property real hop: mood === "asking" ? (frame % 2 === 0 ? 0 : px)\n                              : mood === "idle" ? (Math.floor(frame / 2) % 2 === 0 ? 0 : px * 0.5)\n                              : 0\n    width: 11 * px; height: 9 * px + px\n\n    onMoodChanged: frame = 0\n\n    function setAt(row, col, ch) { return row.substring(0, col) + ch + row.substring(col + 1); }\n    function build(m, f, b) {\n        var top = ["...........", "..........."];\n        var body = ["..XXXXXXX..", "..XXXXXXX..", "..XXXXXXX..", "XXXXXXXXXXX", "XXXXXXXXXXX", "..XXXXXXX.."];\n        var stand = "..X.X.X.X..", step = ".X.X.X.X...";\n        var legs = stand, er = 2, el = 3, eR = 7;\n        if (m === "idle") {\n            legs = Math.floor(f / 2) % 2 ? step : stand;\n        } else if (m === "thinking") {\n            er = 1;                                            // eyes up\n            if (Math.floor(f / 4) % 2) { el = 4; eR = 8; }     // ...and drifting while it ponders\n            var lit = f % 4;                                   // · · · filling in, then clearing\n            for (var i = 0; i < 3; i++) if (i < lit) top[0] = setAt(top[0], 4 + 2 * i, "D");\n        } else if (m === "working") {\n            legs = f % 2 ? step : stand;\n            el = 4; eR = 8;                                    // focused on the task\n        } else if (m === "waiting") {\n            er = 2; el = 4; eR = 8;                            // a look toward the card\n            top[1] = setAt(top[1], 9, Math.floor(f / 3) % 2 ? "D" : ".");   // a small "!" blink\n            top[0] = setAt(top[0], 9, Math.floor(f / 3) % 2 ? "D" : ".");\n        } else if (m === "asking") {\n            var w = f % 4;\n            if (w === 0) {                                     // left arm up\n                body[1] = setAt(setAt(body[1], 0, "X"), 1, "X"); body[2] = setAt(setAt(body[2], 0, "X"), 1, "X");\n                body[3] = setAt(setAt(body[3], 0, "."), 1, "."); body[4] = setAt(setAt(body[4], 0, "."), 1, ".");\n            } else if (w === 2) {                              // right arm up\n                body[1] = setAt(setAt(body[1], 9, "X"), 10, "X"); body[2] = setAt(setAt(body[2], 9, "X"), 10, "X");\n                body[3] = setAt(setAt(body[3], 9, "."), 10, "."); body[4] = setAt(setAt(body[4], 9, "."), 10, ".");\n            }\n            legs = w % 2 ? step : stand;\n        }\n        if (!b) { body[er] = setAt(setAt(body[er], el, "E"), eR, "E"); }\n        return top.concat(body).concat([legs]);\n    }\n\n    Timer { interval: pc.interval; repeat: true; running: pc.visible; onTriggered: pc.frame = (pc.frame + 1) % 8 }\n    Timer { interval: 3200; repeat: true; running: pc.visible && pc.mood !== "thinking"\n            onTriggered: { pc.blink = true; pcUnblink.restart(); } }\n    Timer { id: pcUnblink; interval: 140; onTriggered: pc.blink = false }\n\n    Grid {\n        columns: 11\n        y: pc.hop\n        Behavior on y { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }\n        Repeater {\n            model: 99\n            Rectangle {\n                required property int index\n                readonly property string ch: pc.grid[Math.floor(index / 11)].charAt(index % 11)\n                width: pc.px; height: pc.px\n                color: ch === "X" ? pc.bodyColor : ch === "E" ? pc.eyeColor : ch === "D" ? pc.dotColor : "transparent"\n            }\n        }\n    }\n}\n',
-    "PanaceaClaudeCard.qml": 'import QtQuick\n\n// written by chat-patch.py (panacea-claude-bridge)\n// a finished approval: what ran, and whether it worked\nRectangle {\n    property var sys\n    id: cr\n    property var card: ({})\n    readonly property string outcome: cr.card.decision === "allow" ? (cr.card.ok ? "done" : "failed")\n                                    : cr.card.decision === "deny" ? "denied" : "unanswered"\n    height: crRow.implicitHeight + 18; radius: 11\n    color: Qt.rgba(1, 1, 1, 0.06)\n    Row {\n        id: crRow; x: 12; y: 9; width: parent.width - 24; spacing: 10\n        Rectangle {\n            width: 18; height: 18; radius: 9; anchors.verticalCenter: parent.verticalCenter\n            color: cr.outcome === "done" ? sys.colFg : cr.outcome === "failed" ? sys.colCrit : Qt.rgba(1, 1, 1, 0.1)\n            Text { anchors.centerIn: parent; text: cr.outcome === "done" ? "✓" : cr.outcome === "failed" ? "!" : "×"\n                   color: cr.outcome === "done" ? sys.colBg : cr.outcome === "failed" ? "#ffffff" : sys.colMuted\n                   font { pixelSize: 11; bold: true } }\n        }\n        Column {\n            width: parent.width - 28 - crState.implicitWidth - 10; spacing: 2; anchors.verticalCenter: parent.verticalCenter\n            Text { width: parent.width; elide: Text.ElideRight; text: String(cr.card.title || "")\n                   color: sys.colFg; font { pixelSize: 12; bold: true; family: sys.fontBody } }\n            Text { width: parent.width; elide: Text.ElideRight; maximumLineCount: 1; textFormat: Text.PlainText\n                   visible: text.length > 0; text: String(cr.card.body || "").replace(/\\s*\\n\\s*/g, " ")\n                   color: sys.colMuted; font { family: sys.fontFam; pixelSize: 11 } }\n        }\n        Text { id: crState; anchors.verticalCenter: parent.verticalCenter\n               text: ({ done: "Done", failed: "Failed", denied: "Denied", unanswered: "No answer" })[cr.outcome]\n               color: cr.outcome === "failed" ? sys.colCrit : sys.colMuted; font.pixelSize: 11 }\n    }\n}\n',
+    "PanaceaClaudeCard.qml": CARD_QML,
+    "PanaceaClaudeFile.qml": FILE_QML,
 }
 
 REPLACEMENTS = [
@@ -430,6 +772,37 @@ POST = [
 ]
 
 
+# Third pass (v32), the chat's UX: a reply keeps the timeline it showed while Claude worked
+# (tools stay as quiet lines that open to what ran and what came back; approved actions as
+# compact cards that open too), files show in your bubble and as chips in the message box,
+# the queue survives leaving the island, and the view only follows new text while you're
+# at the bottom.
+UX = [
+    ('                        width: parent.width; spacing: 8\n                        // what Claude ran with your approval, and how it went\n                        // older replies kept only their cards; newer ones keep the whole timeline\n                        Repeater { model: msgItem.modelData.timeline || (msgItem.modelData.cards || []).map(function (c) { return Object.assign({ k: "card" }, c); })\n                                   delegate: PanaceaClaudeStep { required property var modelData\n                                       width: msgItem.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                                       kind: String(modelData.k || ""); text: String(modelData.t || ""); cardTitle: String(modelData.title || "")\n                                       cardBody: String(modelData.body || ""); outcome: String(modelData.decision || ""); worked: !!modelData.ok } }\n',
+     '                        width: parent.width; spacing: 10\n                        // the reply\'s timeline - remarks, the tools it ran (open one to see what ran and\n                        // what came back), approved actions - exactly as it showed while Claude worked;\n                        // older replies kept only their cards\n                        readonly property var steps: msgItem.modelData.timeline || (msgItem.modelData.cards || []).map(function (c) { return Object.assign({ k: "card" }, c); })\n                        Column {\n                            visible: msgItem.steps.length > 0\n                            width: msgItem.width; spacing: 0\n                            Repeater { model: msgItem.steps\n                                       delegate: PanaceaClaudeStep { required property var modelData; required property int index\n                                           width: msgItem.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                                           prevKind: index > 0 ? String((msgItem.steps[index - 1] || {}).k || "") : ""\n                                           kind: String(modelData.k || ""); text: String(modelData.t || ""); cardTitle: String(modelData.title || "")\n                                           cardBody: String(modelData.body || ""); outcome: String(modelData.decision || ""); worked: !!modelData.ok\n                                           detail: String(modelData.d || ""); output: String(modelData.out || ""); failed: !!modelData.err } }\n                        }\n                        // the files sent with it: pictures as thumbnails, other files by name\n                        Flow {\n                            visible: (msgItem.modelData.files || []).length > 0\n                            width: msgItem.width; spacing: 6\n                            layoutDirection: msgItem.mine ? Qt.RightToLeft : Qt.LeftToRight\n                            Repeater { model: msgItem.modelData.files || []\n                                       delegate: PanaceaClaudeFile { required property var modelData\n                                           sys: view.sys; path: String(modelData); r: view.rInner } }\n                        }\n'),
+    ('        RowLayout {\n            visible: view.service === "chat" && view.attachments.length > 0\n            Layout.fillWidth: true\n            Text { Layout.fillWidth: true; text: view.sys.tr("Прикреплено файлов:") + " " + view.attachments.length; color: view.sys.colMuted }\n            Text { text: "×"; color: view.sys.colMuted; font.pixelSize: 18; MouseArea { anchors.fill: parent; anchors.margins: -5; onClicked: view.attachments = [] } }\n        }\n',
+     '        // what goes with the next message: thumbnails and file chips, each with its own x\n        Flow {\n            visible: view.service === "chat" && view.attachments.length > 0\n            Layout.fillWidth: true\n            spacing: 6\n            Repeater { model: view.attachments\n                       delegate: PanaceaClaudeFile { required property var modelData; required property int index\n                           sys: view.sys; path: String(modelData); removable: true; r: view.rInner\n                           onRemoved: { var a = view.attachments.slice(); a.splice(index, 1); view.attachments = a; } } }\n        }\n'),
+    ('                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 10\n                    Repeater {\n                        model: timelineModel\n                        delegate: PanaceaClaudeStep {\n                            required property string k; required property string t; required property string title\n                            required property string body; required property string why; required property string decision\n                            required property bool ok; required property string answered\n                            width: parent.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                            kind: k; text: t; cardTitle: title; cardBody: body; reason: why; outcome: decision; worked: ok; answer: answered\n                            animateIn: true\n                            onChosen: c => view.answerApproval(c)\n                        }\n                    }\n                    Row {\n',
+     '                Column {\n                    visible: view.busy\n                    width: parent.width; spacing: 0\n                    Repeater {\n                        model: timelineModel\n                        delegate: PanaceaClaudeStep {\n                            required property string k; required property string t; required property string title\n                            required property string body; required property string why; required property string decision\n                            required property bool ok; required property string answered\n                            required property string d; required property string out; required property bool err; required property bool run\n                            required property int index\n                            width: parent.width; sys: view.sys; boxR: view.boxR; rInner: view.rInner\n                            prevKind: index > 0 ? String(timelineModel.get(index - 1).k) : ""\n                            kind: k; text: t; cardTitle: title; cardBody: body; reason: why; outcome: decision; worked: ok; answer: answered\n                            detail: d; output: out; failed: err; running: run\n                            animateIn: true\n                            onChosen: c => view.answerApproval(c)\n                        }\n                    }\n                    Item { width: 1; height: timelineModel.count > 0 ? 14 : 0 }\n                    Row {\n'),
+    ('        return { k: String(o.k || ""), t: String(o.t || ""), title: String(o.title || ""), body: String(o.body || ""),\n                 why: String(o.why || ""), decision: String(o.decision || ""), ok: !!o.ok, answered: String(o.answered || "") };',
+     '        return { k: String(o.k || ""), t: String(o.t || ""), title: String(o.title || ""), body: String(o.body || ""),\n                 why: String(o.why || ""), decision: String(o.decision || ""), ok: !!o.ok, answered: String(o.answered || ""),\n                 d: String(o.d || ""), out: String(o.out || ""), err: !!o.err, run: o.k === "tool" && o.done === false };'),
+    ('        a.push({role:"user", content:msg, at:Date.now()}); sys.islandChatMessages = a;',
+     '        a.push({role:"user", content:msg, at:Date.now(), files:attachments.slice()}); sys.islandChatMessages = a;   // the files show in your bubble'),
+    ('    property var queue: []\n',
+     '    property var queue: []\n    // the queue outlives the page: leave the island and come back, it\'s still there, and it\n    // goes out as soon as Claude is free (also when the reply came in while you were away)\n    FileView { id: queueStore; path: Quickshell.env("HOME") + "/.local/state/panacea-claude/queue.json"\n               blockLoading: true; printErrors: false }\n    property bool queueLoaded: false\n    function restoreQueue() {\n        try { var q = JSON.parse(queueStore.text()); if (Array.isArray(q)) view.queue = q.map(String); } catch (e) {}\n        view.queueLoaded = true;\n    }\n    onQueueChanged: if (view.queueLoaded) queueStore.setText(JSON.stringify(view.queue))\n    Timer { interval: 600; repeat: true; running: view.queue.length > 0 && !view.busy\n            onTriggered: if (!view.awaiting() && !view.ownReq) view.flushQueue() }\n'),
+    ('        if (view.busy || !view.queue.length) return;',
+     '        if (view.busy || view.awaiting() || !view.queue.length) return;'),
+    ('        view.restoreChat();   // after a shell restart: the conversation, as you left it\n',
+     "        view.restoreChat();   // after a shell restart: the conversation, as you left it\n        view.restoreQueue();  // and what you'd queued\n"),
+    ('            onContentHeightChanged: if (contentItem) contentItem.contentY = Math.max(0, contentHeight - availableHeight)\n',
+     "            // follows the conversation down while you're at the bottom; scrolled up to read (or\n            // opening a step further up), it stays where you are\n            property real lastH: 0\n            onContentHeightChanged: {\n                if (contentItem && contentItem.contentY >= lastH - availableHeight - 40)\n                    contentItem.contentY = Math.max(0, contentHeight - availableHeight);\n                lastH = contentHeight;\n            }\n"),
+    ('                    onClicked: { view.sys.islandChatMessages = []; view.attachments = []; }',
+     '                    onClicked: { view.sys.islandChatMessages = []; view.attachments = []; view.queue = []; }'),
+    ('{ if (!view.busy) { view.sys.islandChatMessages = []; view.attachments = []; input.text = ""; } event.accepted = true; }',
+     '{ if (!view.busy) { view.sys.islandChatMessages = []; view.attachments = []; view.queue = []; input.text = ""; } event.accepted = true; }'),
+]
+
+
 def read(p):
     with open(p, encoding="utf-8") as f:
         return f.read()
@@ -508,6 +881,11 @@ def main() -> int:
     for old, new in POST:
         if out.count(old) != 1:
             print(f"chat-patch: second-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX:
+        if out.count(old) != 1:
+            print(f"chat-patch: UX-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 
