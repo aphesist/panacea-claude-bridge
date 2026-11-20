@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v38"
+VERSION = "v40"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -1218,6 +1218,63 @@ UX2 = [
 ]
 
 
+# v39: dictation in the chat box, ChatGPT-style. The mic (or holding Right Ctrl while the chat is
+# open) records through scripts/custom/vox.sh; while it listens the box becomes the voice wave
+# (PkVoiceWave), with x (drop) on the left and a white check (done) on the right. The text
+# arrives through the shell's voxChatTextArrived and goes in at the cursor.
+UX3 = [
+    ('    property var attachments: []\n',
+     '    property var attachments: []\n'
+     '    readonly property bool voxHere: view.sys.voxTo === "chat" && view.sys.voxState !== ""   // v39: dictating into this box\n'
+     '    Connections {\n'
+     '        target: view.sys\n'
+     '        function onVoxChatTextArrived(text) {\n'
+     '            var pos = input.cursorPosition, pre = input.text.slice(0, pos);\n'
+     '            input.insert(pos, (pre.length && !/\\s$/.test(pre) ? " " : "") + text);\n'
+     '            input.forceActiveFocus();\n'
+     '        }\n'
+     '    }\n'),
+    ('                Item {\n                    Layout.fillWidth: true; Layout.fillHeight: true\n                    Flickable {\n                        id: inputScroll; anchors.fill: parent; clip: true\n',
+     '                Item {\n                    Layout.fillWidth: true; Layout.fillHeight: true\n'
+     '                    PkVoiceWave {   // v39\n'
+     '                        sys: view.sys; anchors.fill: parent; anchors.topMargin: 9; anchors.bottomMargin: 9\n'
+     '                        visible: view.voxHere\n'
+     '                        listening: view.voxHere && view.sys.voxState === "listening"\n'
+     '                        busy: view.voxHere && view.sys.voxState === "transcribing"\n'
+     '                    }\n'
+     '                    Flickable {\n                        id: inputScroll; anchors.fill: parent; clip: true\n'
+     '                        visible: !view.voxHere\n'),
+    ('                Rectangle {\n                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: view.rInner\n                    color: attachMouse.containsMouse',
+     '                Rectangle {   // v39: drop the dictation\n'
+     '                    visible: view.voxHere\n'
+     '                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: view.rInner\n'
+     '                    color: voxDropMa.containsMouse ? view.sys.pk.hover : "transparent"\n'
+     '                    Behavior on color { ColorAnimation { duration: view.sys.pk.dFast } }\n'
+     '                    PkIcon { sys: view.sys; anchors.centerIn: parent; size: 18; name: "x"\n'
+     '                             color: voxDropMa.containsMouse ? view.sys.pk.fg : view.sys.pk.muted }\n'
+     '                    MouseArea { id: voxDropMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor\n'
+     '                                onClicked: view.sys.voxRun("cancel", "") }\n'
+     '                }\n'
+     '                Rectangle {\n                    visible: !view.voxHere\n                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: view.rInner\n                    color: attachMouse.containsMouse'),
+    ('                Rectangle {\n                    readonly property bool ready:',
+     '                Rectangle {   // v39: the mic; while it listens, a white check that ends it\n'
+     '                    readonly property bool rec: view.voxHere && view.sys.voxState === "listening"\n'
+     '                    readonly property bool wait: view.voxHere && view.sys.voxState === "transcribing"\n'
+     '                    Layout.preferredWidth: 36; Layout.preferredHeight: 36; radius: view.rInner\n'
+     '                    color: rec ? (micMa.containsMouse ? Qt.rgba(1, 1, 1, 0.85) : view.sys.pk.on)\n'
+     '                               : (micMa.containsMouse ? view.sys.pk.hover : "transparent")\n'
+     '                    Behavior on color { ColorAnimation { duration: view.sys.pk.dFast } }\n'
+     '                    PkIcon { sys: view.sys; anchors.centerIn: parent; size: 18\n'
+     '                             name: parent.rec || parent.wait ? "check" : "microphone"   // Bold: Fill\'s check is a check-square\n'
+     '                             color: parent.rec ? view.sys.pk.onInk : micMa.containsMouse ? view.sys.pk.fg : view.sys.pk.muted\n'
+     '                             opacity: parent.wait ? 0.45 : 1 }\n'
+     '                    MouseArea { id: micMa; anchors.fill: parent; hoverEnabled: true; enabled: !parent.wait\n'
+     '                                cursorShape: Qt.PointingHandCursor; onClicked: view.sys.voxRun("toggle", "chat") }\n'
+     '                }\n'
+     '                Rectangle {\n                    visible: !view.voxHere\n                    readonly property bool ready:'),
+]
+
+
 def read(p):
     with open(p, encoding="utf-8") as f:
         return f.read()
@@ -1376,6 +1433,11 @@ def main() -> int:
     for old, new in UX2:
         if out.count(old) != 1:
             print(f"chat-patch: v33-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX3:
+        if out.count(old) != 1:
+            print(f"chat-patch: v39-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 
