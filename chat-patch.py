@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v35"
+VERSION = "v36"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -79,8 +79,8 @@ HEADER = '''        // ''' + TAG + ''': the model switcher (one segmented contro
                 color: newMouse.containsMouse && !view.busy ? Qt.rgba(1, 1, 1, 0.1) : "transparent"
                 opacity: view.busy ? 0.35 : 1
                 Behavior on color { ColorAnimation { duration: 150 } }
-                PanaceaClaudeIcon { anchors.centerIn: parent; width: 17; height: 17; kind: "compose"
-                                    tint: newMouse.containsMouse ? view.sys.colFg : view.sys.colMuted }
+                PkIcon { sys: view.sys; anchors.centerIn: parent; name: "broom"; size: 19; filled: newMouse.containsMouse   // clear the chat
+                         color: newMouse.containsMouse ? view.sys.colFg : Qt.rgba(1, 1, 1, 0.75) }
                 MouseArea {
                     id: newMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                     enabled: !view.busy
