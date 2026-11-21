@@ -361,6 +361,8 @@ Rectangle {
 
 TEXT_QML = r'''import QtQuick
 import Quickshell
+import Quickshell.Io
+import Quickshell.Widgets
 
 // written by chat-patch.py (panacea-claude-bridge)
 // Claude's text, readable: paragraphs, '-' and '1.' lists (nested by two spaces), **bold**,
@@ -384,35 +386,32 @@ Item {
 
     function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
     function inline(s) {
-        var out = "", parts = String(s).split(/(`[^`\n]+`)/);
-        for (var i = 0; i < parts.length; i++) {
-            var p = parts[i];
-            if (!p) continue;
-            if (p.length > 2 && p.charAt(0) === "`" && p.charAt(p.length - 1) === "`") {
-                var c = p.slice(1, -1);
-                out += '<a href="copy:' + encodeURIComponent(c) + '" style="color:' + md.codeColor
-                     + '; text-decoration:none; font-family:\'' + (md.sys ? md.sys.fontFam : "monospace") + '\'">'
-                     + md.esc(c) + '</a>';
-            } else {
-                // [label](target): opens; the rest is plain text with bold and bare web links
-                var re = /\[([^\]\n]+)\]\(([^)\s]+)\)/g, last = 0, m;
-                while ((m = re.exec(p)) !== null) {
-                    out += md.plain(p.slice(last, m.index));
-                    out += '<a href="open:' + encodeURIComponent(m[2]) + '" style="color:' + md.fg
-                         + '; text-decoration:underline">' + md.esc(m[1]) + '</a>';
-                    last = re.lastIndex;
-                }
-                out += md.plain(p.slice(last));
-            }
-        }
-        return out;
+        // code spans, links and bare URLs are set aside first (placeholders), so ** __ * _ ~~
+        // pair up across them ("**`code`**" is bold code) and never fire inside them
+        var keep = [];
+        function stash(html) { keep.push(html); return "\u0000" + (keep.length - 1) + "\u0000"; }
+        var linkStyle = '" style="color:' + md.fg + '; text-decoration:underline">';
+        var t = String(s).replace(/`([^`\n]+)`/g, function (m0, c) {
+            return stash('<a href="copy:' + encodeURIComponent(c) + '" style="color:' + md.codeColor
+                         + '; text-decoration:none; font-family:\'' + (md.sys ? md.sys.fontFam : "monospace") + '\'">'
+                         + md.esc(c) + '</a>');
+        });
+        t = t.replace(/!\[([^\]\n]*)\]\(([^)\s]+)\)/g, function (m0, label, url) { return "[" + (label || url.split("/").pop()) + "](" + url + ")"; });
+        t = t.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, function (m0, label, url) {
+            return stash('<a href="open:' + encodeURIComponent(url) + linkStyle + md.esc(label).replace(/\u0000(\d+)\u0000/g, function (m1, i) { return keep[+i]; }) + '</a>');
+        });
+        t = t.replace(/(https?:\/\/[^\s<>"')\]\u0000]+[^\s<>"')\].,;:!?\u0000])/g, function (m0, url) {
+            return stash('<a href="open:' + encodeURIComponent(url) + linkStyle + md.esc(url) + '</a>');
+        });
+        t = md.esc(t);
+        t = t.replace(/\*\*(?=\S)([^\n]+?)\*\*/g, "<b>$1</b>")
+             .replace(/(^|[^\w])__(?=\S)([^\n]+?)__(?!\w)/g, "$1<b>$2</b>")
+             .replace(/~~(?=\S)([^\n]+?)~~/g, "<s>$1</s>")
+             .replace(/(^|[^\w*])\*(?=[^\s*])([^*\n]+?)\*(?![\w*])/g, "$1<i>$2</i>")
+             .replace(/(^|[^\w])_(?=[^\s_])([^_\n]+?)_(?!\w)/g, "$1<i>$2</i>");
+        return t.replace(/\u0000(\d+)\u0000/g, function (m0, i) { return keep[+i]; });
     }
-    function plain(s) {
-        var t = md.esc(s);
-        t = t.replace(/(https?:\/\/[^\s<>"')\]]+[^\s<>"')\].,;:!?])/g,
-                      '<a href="open:$1" style="color:' + md.fg + '; text-decoration:underline">$1</a>');
-        return t.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
-    }
+    function plain(s) { return md.inline(s); }
     // what an open link points to -> a URL the desktop can open (xdg-open via Qt)
     function target(t) {
         t = decodeURIComponent(t);
@@ -437,12 +436,38 @@ Item {
                 out.push({ k: "code", lang: f[1], t: code.join("\n").replace(/\s+$/, "") });
                 continue;
             }
+            if (/^\s*(!\[[^\]\n]*\]\([^)\s]+\)\s*)+$/.test(L)) {     // ![alt](picture or video)
+                flushPara(); flushList();
+                var mre = /!\[([^\]\n]*)\]\(([^)\s]+)\)/g, mm;
+                while ((mm = mre.exec(L)) !== null) out.push({ k: "media", alt: mm[1], src: mm[2] });
+                i++; continue;
+            }
+            if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(L)) { flushPara(); flushList(); out.push({ k: "hr" }); i++; continue; }
+            if (/^\s*>/.test(L)) {                       // a quote: consecutive "> " lines
+                flushPara(); flushList();
+                var q = [];
+                while (i < lines.length && /^\s*>/.test(lines[i])) { q.push(md.inline(lines[i].replace(/^\s*>\s?/, ""))); i++; }
+                out.push({ k: "quote", h: q.join("<br>") });
+                continue;
+            }
+            if (/\|/.test(L) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+                flushPara(); flushList();
+                function cells(r) { return r.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(function (c) { return md.inline(c.trim()); }); }
+                var head = cells(L), rows = [];
+                i += 2;
+                while (i < lines.length && /\|/.test(lines[i]) && !/^\s*$/.test(lines[i])) { rows.push(cells(lines[i])); i++; }
+                out.push({ k: "table", head: head, rows: rows });
+                continue;
+            }
             var m = /^(\s*)([-*•]|\d+[.)])\s+(.*)$/.exec(L);
             if (m) {
                 flushPara();
                 if (!list) list = { k: "list", items: [] };
+                var body = m[3], mark = /\d/.test(m[2]) ? m[2].replace(")", ".") : "•";
+                var box = /^\[([ xX])\]\s+(.*)$/.exec(body);          // - [ ] / - [x] task boxes
+                if (box) { mark = box[1] === " " ? "☐" : "☑"; body = box[2]; }
                 list.items.push({ lvl: Math.min(3, Math.floor(m[1].replace(/\t/g, "  ").length / 2)),
-                                  mark: /\d/.test(m[2]) ? m[2].replace(")", ".") : "•", h: md.inline(m[3]) });
+                                  mark: mark, h: md.inline(body) });
                 i++; continue;
             }
             if (/^\s*$/.test(L)) { flushPara(); flushList(); i++; continue; }
@@ -451,8 +476,8 @@ Item {
                 last.h += "<br>" + md.inline(L.trim());
                 i++; continue;
             }
-            var h = /^#{1,4}\s+(.*)$/.exec(L);
-            if (h) { flushPara(); flushList(); out.push({ k: "h", h: md.inline(h[1]) }); i++; continue; }
+            var h = /^\s*#{1,6}\s+(.*)$/.exec(L);
+            if (h) { flushPara(); flushList(); out.push({ k: "h", lvl: L.trim().indexOf(" "), h: md.inline(h[1]) }); i++; continue; }
             flushList(); para.push(L); i++;
         }
         flushPara(); flushList();
@@ -485,7 +510,8 @@ Item {
                 required property var modelData
                 property var b: modelData
                 width: md.width
-                sourceComponent: b.k === "code" ? codeBlock : b.k === "list" ? listBlock : textBlock
+                sourceComponent: b.k === "code" ? codeBlock : b.k === "list" ? listBlock : b.k === "quote" ? quoteBlock
+                               : b.k === "hr" ? hrBlock : b.k === "table" ? tableBlock : b.k === "media" ? mediaBlock : textBlock
             }
         }
     }
@@ -500,7 +526,8 @@ Item {
             text: md.html(parent ? parent.b.h : "")
             color: md.fg
             selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: md.fg
-            font { pixelSize: md.size; bold: parent ? parent.b.k === "h" : false; family: md.sys ? md.sys.fontBody : "" }
+            font { pixelSize: md.size + (parent && parent.b.k === "h" ? Math.max(0, 4 - parent.b.lvl) * 2 : 0)
+                   bold: parent ? parent.b.k === "h" : false; family: md.sys ? md.sys.fontBody : "" }
             onLinkActivated: link => md.activate(link, te, teHover.point.position.x, teHover.point.position.y)
             HoverHandler { id: teHover; cursorShape: te.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
         }
@@ -540,6 +567,164 @@ Item {
                         HoverHandler { id: liHover; cursorShape: liText.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
                     }
                 }
+            }
+        }
+    }
+
+    // ![alt](path): the picture itself (a GIF plays), or a video's first frames with a play mark
+    // (ffmpeg grabs one frame into ~/.cache/panacea-claude/thumbs). A click opens it in its app:
+    // the island viewer for pictures, mpv for videos.
+    Component {
+        id: mediaBlock
+        Item {
+            id: mb
+            readonly property var b: parent ? parent.b : ({ src: "", alt: "" })
+            readonly property string url: md.target(b.src || "")
+            readonly property string ext: String(b.src || "").split("?")[0].split(".").pop().toLowerCase()
+            readonly property bool video: ["mp4", "mkv", "webm", "mov", "avi", "m4v", "ogv", "wmv", "flv"].indexOf(ext) >= 0
+            readonly property bool gif: ext === "gif"
+            readonly property string local: url.indexOf("file://") === 0 ? decodeURI(url.slice(7)) : ""
+            readonly property string thumb: video && local ? Quickshell.env("HOME") + "/.cache/panacea-claude/thumbs/" + Qt.md5(local) + ".jpg" : ""
+            property string poster: ""
+            readonly property string shown: video ? poster : url
+            readonly property real natW: video ? (pic.implicitWidth || 16) : gif ? (anim.implicitWidth || 16) : (pic.implicitWidth || 16)
+            readonly property real natH: video ? (pic.implicitHeight || 9) : gif ? (anim.implicitHeight || 9) : (pic.implicitHeight || 9)
+            readonly property bool ready: (gif ? anim.status : pic.status) === Image.Ready
+            width: parent ? parent.width : 0
+            height: frame.height + (cap.visible ? cap.implicitHeight + 6 : 0)
+
+            Process {
+                running: mb.video && mb.local !== "" && mb.poster === ""
+                command: ["sh", "-c", 'mkdir -p "$(dirname "$2")"; [ -s "$2" ] || ffmpeg -v error -y -ss 1 -i "$1" -frames:v 1 -vf "scale=960:-2" "$2" 2>/dev/null || ffmpeg -v error -y -i "$1" -frames:v 1 -vf "scale=960:-2" "$2"; [ -s "$2" ] && echo ok', "_", mb.local, mb.thumb]
+                stdout: StdioCollector { onStreamFinished: if (text.indexOf("ok") >= 0) mb.poster = "file://" + mb.thumb }
+            }
+
+            ClippingRectangle {
+                id: frame
+                readonly property real maxH: 300
+                width: !mb.ready ? Math.min(parent.width, 320) : Math.min(parent.width, mb.natW, maxH * mb.natW / mb.natH)
+                height: !mb.ready ? 180 : width * mb.natH / mb.natW
+                radius: Math.max(8, md.r)
+                color: Qt.rgba(1, 1, 1, 0.05)
+                Image {
+                    id: pic
+                    anchors.fill: parent
+                    visible: !mb.gif
+                    source: mb.gif ? "" : mb.shown
+                    asynchronous: true; cache: true; smooth: true; mipmap: true
+                    fillMode: Image.PreserveAspectFit
+                    sourceSize.width: 1200
+                }
+                AnimatedImage {
+                    id: anim
+                    anchors.fill: parent
+                    visible: mb.gif
+                    source: mb.gif ? mb.url : ""
+                    asynchronous: true; playing: visible
+                    fillMode: Image.PreserveAspectFit
+                }
+                // loading / missing
+                Text {
+                    anchors.centerIn: parent
+                    visible: !mb.ready
+                    text: (mb.gif ? anim.status : pic.status) === Image.Error || (mb.video && !mb.local) ? "can't show this" : ""
+                    color: md.sys ? md.sys.colMuted : "grey"
+                    font { pixelSize: md.size - 1; family: md.sys ? md.sys.fontBody : "" }
+                }
+                // a video: a white play circle
+                Rectangle {
+                    visible: mb.video
+                    anchors.centerIn: parent
+                    width: 46; height: 46; radius: 23
+                    color: mbMa.containsMouse ? "white" : Qt.rgba(1, 1, 1, 0.9)
+                    Text { anchors.centerIn: parent; anchors.horizontalCenterOffset: 2; text: "▶"; color: "black"; font.pixelSize: 18 }
+                }
+                Rectangle {        // hover veil
+                    anchors.fill: parent
+                    color: "white"
+                    opacity: mbMa.containsMouse ? 0.06 : 0
+                    Behavior on opacity { NumberAnimation { duration: 120 } }
+                }
+                MouseArea {
+                    id: mbMa
+                    anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
+                    onClicked: md.activate("open:" + encodeURIComponent(mb.b.src), mb, mouseX, mouseY)
+                }
+            }
+            Text {
+                id: cap
+                y: frame.height + 6
+                width: parent.width
+                visible: (mb.b.alt || "") !== ""
+                text: mb.b.alt || ""
+                elide: Text.ElideRight
+                color: md.sys ? md.sys.colMuted : "grey"
+                font { pixelSize: md.size - 2; family: md.sys ? md.sys.fontBody : "" }
+            }
+        }
+    }
+
+    Component {
+        id: quoteBlock
+        Item {
+            width: parent ? parent.width : 0
+            height: qText.implicitHeight
+            Rectangle { width: 2; height: parent.height; radius: 1; color: Qt.rgba(1, 1, 1, 0.22) }
+            TextEdit {
+                id: qText
+                x: 12; width: parent.width - 12
+                readOnly: true; selectByMouse: true
+                textFormat: TextEdit.RichText; wrapMode: TextEdit.Wrap
+                text: md.html(parent && parent.parent ? parent.parent.b.h : "")
+                color: md.sys ? md.sys.colMuted : "grey"
+                selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: md.fg
+                font { pixelSize: md.size; family: md.sys ? md.sys.fontBody : "" }
+                onLinkActivated: link => md.activate(link, qText, qHover.point.position.x, qHover.point.position.y)
+                HoverHandler { id: qHover; cursorShape: qText.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+            }
+        }
+    }
+
+    Component {
+        id: hrBlock
+        Item {
+            width: parent ? parent.width : 0; height: 9
+            Rectangle { y: 4; width: parent.width; height: 1; color: Qt.rgba(1, 1, 1, 0.12) }
+        }
+    }
+
+    // tables: a card with a muted header row and hairlines between rows, columns sized by content
+    Component {
+        id: tableBlock
+        Rectangle {
+            id: tb
+            readonly property var t: parent ? parent.b : ({ head: [], rows: [] })
+            width: parent ? parent.width : 0
+            height: tbText.implicitHeight + 12
+            radius: Math.max(8, md.r)
+            color: Qt.rgba(1, 1, 1, 0.05)
+            function row(cs, head) {
+                var h = "";
+                for (var c = 0; c < tb.t.head.length; c++)
+                    h += '<td style="padding:4px 10px 4px 10px;' + (head ? ' color:' + (md.sys ? md.sys.colMuted : "grey") + ';' : '')
+                       + '">' + (head ? "<b>" : "") + (cs[c] || "") + (head ? "</b>" : "") + "</td>";
+                return "<tr>" + h + "</tr>";
+            }
+            TextEdit {
+                id: tbText
+                x: 2; y: 6; width: parent.width - 4
+                readOnly: true; selectByMouse: true
+                textFormat: TextEdit.RichText; wrapMode: TextEdit.Wrap
+                text: {
+                    var h = '<table cellspacing="0" width="100%">' + tb.row(tb.t.head, true);
+                    for (var r = 0; r < tb.t.rows.length; r++) h += tb.row(tb.t.rows[r], false);
+                    return h + "</table>";
+                }
+                color: md.fg
+                selectionColor: Qt.rgba(1, 1, 1, 0.25); selectedTextColor: md.fg
+                font { pixelSize: md.size - 1; family: md.sys ? md.sys.fontBody : "" }
+                onLinkActivated: link => md.activate(link, tbText, tbHover.point.position.x, tbHover.point.position.y)
+                HoverHandler { id: tbHover; cursorShape: tbText.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
             }
         }
     }
