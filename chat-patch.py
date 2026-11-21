@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v40"
+VERSION = "v41"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -1275,6 +1275,47 @@ UX3 = [
 ]
 
 
+# v41: opening the Claude tab never builds messages while the island is still opening (that was
+# the stutter): the page comes up empty with a skeleton in the conversation's place, and once
+# the island has settled (the Motion tab's duration + a frame or two) the newest two messages
+# appear, the rest two per frame.
+UX4 = [
+    ('    ListModel { id: msgModel }\n',
+     '    ListModel { id: msgModel }\n'
+     '    property bool settled: false   // v41: the island has finished opening; messages may be built\n'
+     '    Timer { id: settleTimer; interval: Math.max(140, (view.sys.animMs || 300) + 90)\n'
+     '            onTriggered: { view.settled = true; view.rebuildMsgs(); } }\n'),
+    ('        if (!view.syncedLen) view.rebuildMsgs();   // ' + TAG + ': the page\'s window on the chat\n',
+     '        settleTimer.start();   // ' + TAG + ': the messages come once the island has opened (skeleton until then)\n'),
+    ('    function syncMsgs() {\n        var m = view.sys.islandChatMessages;\n',
+     '    function syncMsgs() {\n        if (!view.settled) return;   // v41: settleTimer builds them\n        var m = view.sys.islandChatMessages;\n'),
+    ('        var first = Math.max(0, m.length - 4);\n',
+     '        var first = Math.max(0, m.length - 2);   // v41: two at once, the rest two per frame\n'),
+    ('view.prependMsgs(Math.max(view.fillTo, view.shownFrom - 3)); } }',
+     'view.prependMsgs(Math.max(view.fillTo, view.shownFrom - 2)); } }'),
+    ('                // ' + TAG + ': older messages, a page at a time\n',
+     '                // v41: the skeleton while the island opens: your bubble, a reply\'s lines, twice; it pulses\n'
+     '                Column {\n'
+     '                    visible: !view.settled && view.sys.islandChatMessages.length > 0\n'
+     '                    width: parent.width; spacing: 14\n'
+     '                    SequentialAnimation on opacity { running: parent.visible; loops: Animation.Infinite\n'
+     '                        NumberAnimation { from: 1; to: 0.5; duration: 650; easing.type: Easing.InOutSine }\n'
+     '                        NumberAnimation { from: 0.5; to: 1; duration: 650; easing.type: Easing.InOutSine } }\n'
+     '                    Repeater {\n'
+     '                        model: 2\n'
+     '                        delegate: Column {\n'
+     '                            width: parent.width; spacing: 9\n'
+     '                            Rectangle { anchors.right: parent.right; width: parent.width * 0.42; height: 38; radius: view.boxR; color: view.sys.pk.surface }\n'
+     '                            Rectangle { width: parent.width * 0.92; height: 11; radius: 5.5; color: view.sys.pk.surface }\n'
+     '                            Rectangle { width: parent.width * 0.78; height: 11; radius: 5.5; color: view.sys.pk.surface }\n'
+     '                            Rectangle { width: parent.width * 0.55; height: 11; radius: 5.5; color: view.sys.pk.surface }\n'
+     '                        }\n'
+     '                    }\n'
+     '                }\n'
+     '                // ' + TAG + ': older messages, a page at a time\n'),
+]
+
+
 def read(p):
     with open(p, encoding="utf-8") as f:
         return f.read()
@@ -1438,6 +1479,11 @@ def main() -> int:
     for old, new in UX3:
         if out.count(old) != 1:
             print(f"chat-patch: v39-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX4:
+        if out.count(old) != 1:
+            print(f"chat-patch: v41-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 
