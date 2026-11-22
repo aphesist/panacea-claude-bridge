@@ -18,7 +18,7 @@ import sys
 
 QML = os.path.expanduser("~/.config/panacea/ChatView.qml")
 PRISTINE = QML + ".pristine"
-VERSION = "v41"
+VERSION = "v46"
 TAG_PREFIX = "// panacea-local chat patch "
 TAG = TAG_PREFIX + VERSION
 
@@ -117,7 +117,8 @@ Item {
     readonly property var t: sys.pk   // the ui kit's tokens (DESIGN.md)
     property real boxR: 20
     property real rInner: 14
-    property string kind: ""          // text | tool | ask | card
+    property string kind: ""          // text | tool | ask | card | you (a message you sent while it worked)
+    property string files: ""         // you: the files sent with it, one path per line
     property string prevKind: ""      // the row above: sets the gap (tools sit close together)
     property string text: ""
     property string detail: ""        // tool: what it ran (command, path, query...)
@@ -137,7 +138,7 @@ Item {
     readonly property bool canOpen: kind === "tool" ? (detail.length > 0 || output.length > 0)
                                   : kind === "card" ? cardBody.length > 0 : false
     readonly property real gap: prevKind === "" ? 0 : (kind === "tool" && prevKind === "tool") ? 2 : 12
-    readonly property Item shown: kind === "card" ? cardWrap : kind === "ask" ? ask : kind === "tool" ? tool : line
+    readonly property Item shown: kind === "card" ? cardWrap : kind === "ask" ? ask : kind === "tool" ? tool : kind === "you" ? you : line
     implicitHeight: gap + shown.height
     height: implicitHeight
     clip: true
@@ -155,6 +156,38 @@ Item {
         width: st.width
         sys: st.sys; r: st.rInner
         text: st.kind === "text" ? st.text : ""
+    }
+
+    // a message you sent while Claude worked: your bubble, at the point of the run where it went in,
+    // with the files sent with it shown the same way as in a normal message (thumbnails, file chips)
+    Column {
+        id: you
+        y: st.gap
+        visible: st.kind === "you"
+        width: st.width; spacing: 6
+        Flow {
+            visible: st.kind === "you" && st.files.length > 0
+            width: parent.width; spacing: 6; layoutDirection: Qt.RightToLeft
+            Repeater { model: st.kind === "you" && st.files.length ? st.files.split("\n") : []
+                       delegate: PanaceaClaudeFile { required property var modelData
+                           sys: st.sys; path: String(modelData); r: st.rInner } }
+        }
+        Item {
+            visible: st.kind === "you" && st.text.length > 0
+            width: parent.width; height: youBubble.height
+            Rectangle {
+                id: youBubble
+                anchors.right: parent.right
+                width: Math.min(st.width * 0.82, youMetrics.advanceWidth + 30)
+                height: youText.implicitHeight + 20
+                radius: st.boxR; color: Qt.rgba(1, 1, 1, 0.1)
+                TextMetrics { id: youMetrics; text: st.kind === "you" ? st.text : ""; font: youText.font }
+                Text { id: youText; x: 14; y: 10; width: parent.width - 28
+                       text: st.kind === "you" ? st.text : ""; wrapMode: Text.Wrap
+                       color: st.sys.colFg; lineHeight: 1.15
+                       font { family: st.sys.fontBody; pixelSize: 13 } }
+            }
+        }
     }
 
     // a tool: one quiet line with a chevron; opens to the command and its output
@@ -1608,6 +1641,65 @@ def patch_chat_files():
         write_atomic(CHAT_PY, t)
         os.chmod(CHAT_PY, 0o755)
 
+# v42: a message sent while Claude works goes straight into the run (bridge /v1/inject, like
+# typing in the CLI while it works): Claude reads it at its next step, and it shows as your
+# bubble in the live timeline where it went in. Only when no run takes it (the run is just
+# ending) does it wait in the queue as before.
+UX5 = [
+    ('    function enqueue(t) { var q = view.queue.slice(); q.push(t); view.queue = q; }\n',
+     '    function enqueue(t) { var q = view.queue.slice(); q.push(t); view.queue = q; }\n'
+     '    // ' + TAG + ': into the running turn; queued only if no run takes it\n'
+     '    property var injecting: []\n'
+     '    Process { id: injectProc; property string text: ""; property var files: []\n'
+     '        stdout: StdioCollector { onStreamFinished: {\n'
+     '            var ok = false; try { ok = JSON.parse(text).injected === true; } catch (e) {}\n'
+     '            if (!ok) { view.attachments = view.attachments.concat(injectProc.files); if (injectProc.text) view.enqueue(injectProc.text); }\n'
+     '            view.injectNext(); } } }\n'
+     '    function injectMsg(t, files) { var q = view.injecting.slice(); q.push({ t: t, f: files || [] }); view.injecting = q; if (!injectProc.running) view.injectNext(); }\n'
+     '    function injectNext() {\n'
+     '        if (injectProc.running || !view.injecting.length) return;\n'
+     '        var q = view.injecting.slice(); var m = q.shift(); view.injecting = q;\n'
+     '        injectProc.text = m.t; injectProc.files = m.f;\n'
+     '        var cmd = ["python3", "-I", view.ctl, "inject", m.t];\n'
+     '        for (var i = 0; i < m.f.length; i++) cmd.push("--file", String(m.f[i]));\n'
+     '        injectProc.command = cmd;\n'
+     '        injectProc.running = true;\n'
+     '        liveFile.reload();\n'
+     '    }\n'),
+    ('        if (busy && msg) { view.enqueue(msg); input.text = ""; return; }\n',
+     '        if (busy && (msg || attachments.length)) {   // ' + TAG + ': the files go with it, as in a normal message\n'
+     '            view.injectMsg(msg, attachments.slice()); input.text = ""; attachments = []; return; }\n'),
+    ('d: String(o.d || ""), out: String(o.out || ""), err: !!o.err, ',
+     'd: String(o.d || ""), out: String(o.out || ""), err: !!o.err, f: String(o.f || ""), '),
+    ('required property string d; required property string out; required property bool err; required property bool run',
+     'required property string d; required property string out; required property bool err; required property bool run; required property string f'),
+    ('detail: d; output: out; failed: err; running: run',
+     'detail: d; output: out; failed: err; running: run; files: f'),
+    ('detail: String(modelData.d || ""); output: String(modelData.out || ""); failed: !!modelData.err } }',
+     'detail: String(modelData.d || ""); output: String(modelData.out || ""); failed: !!modelData.err; files: String(modelData.f || "") } }'),
+    ('                    readonly property bool ready: (input.text.trim().length || (!view.busy && view.attachments.length)) > 0\n',
+     '                    readonly property bool ready: (input.text.trim().length || view.attachments.length) > 0\n'),
+]
+
+
+# v46: the bridge keeps only the last steps of a long run, so each new step can drop the oldest.
+# Matching rows by position then shifted every row by one and re-laid out every message block
+# (the text blanked and the view jumped). Rows that fell off the top are now removed from the
+# top, so the rest stay exactly as they are.
+UX6 = [
+    ('        for (var j = 0; j < out.length; j++) {\n',
+     '        // ' + TAG + ': steps dropped from the top of a long run: drop the same rows, keep the rest\n'
+     '        if (timelineModel.count && out.length) {\n'
+     '            var same = function (row, o) { return row.k === o.k && row.t === o.t && row.d === o.d && row.title === o.title; };\n'
+     '            if (!same(timelineModel.get(0), out[0])) {\n'
+     '                for (var m = 1; m < Math.min(timelineModel.count, 80); m++) {\n'
+     '                    if (same(timelineModel.get(m), out[0])) { timelineModel.remove(0, m); break; }\n'
+     '                }\n'
+     '            }\n'
+     '        }\n'
+     '        for (var j = 0; j < out.length; j++) {\n'),
+]
+
 
 def main() -> int:
     patch_chat_py()
@@ -1669,6 +1761,16 @@ def main() -> int:
     for old, new in UX4:
         if out.count(old) != 1:
             print(f"chat-patch: v41-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX5:
+        if out.count(old) != 1:
+            print(f"chat-patch: v42-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
+            return 2
+        out = out.replace(old, new, 1)
+    for old, new in UX6:
+        if out.count(old) != 1:
+            print(f"chat-patch: v46-pass anchor not found: {old[:50]!r} - untouched", file=sys.stderr)
             return 2
         out = out.replace(old, new, 1)
 

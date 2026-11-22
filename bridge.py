@@ -295,7 +295,7 @@ TOKEN = TOKEN_FILE.read_text().strip()
 LOCK = threading.Lock()
 CARDS = []   # this run's answered approvals with their outcome (done / failed / denied)
 STEPS = []   # this run's timeline (text, tool and card steps, in order)
-RUN = {"proc": None, "stopped": False}   # the run in progress, so the chat can stop it
+RUN = {"proc": None, "stopped": False, "open": False, "pending": 0}   # the run in progress, so the chat can stop it
 COMMANDS = CACHE / "commands.json"      # Claude Code's slash commands, for the chat's / picker
 
 
@@ -334,6 +334,61 @@ def commands_loop():
     while True:
         refresh_commands()
         time.sleep(6 * 3600)
+
+
+RUN_IO = threading.Lock()   # guards writing to the run's stdin (a message can arrive mid-run)
+
+
+def _user_line(text):
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n"
+
+
+def attach_line(path):
+    """How an attached file reaches Claude, the same for every message: a line with its path."""
+    mime = mimetypes.guess_type(str(path))[0] or ""
+    return f"[Attached {'image' if mime.startswith('image/') else 'file'}: {path}]"
+
+
+def with_files(text, files):
+    return "\n\n".join(x for x in [text.strip(), "\n".join(attach_line(f) for f in files)] if x)
+
+
+def inject(text):
+    """A message sent while Claude works goes straight into the running turn (like typing in the
+    CLI while it works): Claude Code hands it over at its next tool step. False when no run is
+    open to take it (the chat then queues it for the next turn)."""
+    with RUN_IO:
+        proc = RUN["proc"]
+        if not text.strip() or not proc or proc.poll() is not None or not RUN["open"] or RUN["stopped"]:
+            return False
+        try:
+            proc.stdin.write(_user_line(text))
+            proc.stdin.flush()
+        except (OSError, ValueError):
+            return False
+        RUN["pending"] += 1
+        return True
+
+
+def _idle_close(proc, wait=30):
+    """Close the input after `wait` s unless a new turn started (a message, or a task's notification)."""
+    mark = RUN.get("turns", 0)
+    def check():
+        with RUN_IO:
+            quiet = RUN.get("turns", 0) == mark and RUN["pending"] <= 0
+        if quiet:
+            _close_input(proc)
+    threading.Timer(wait, check).start()
+
+
+def _close_input(proc):
+    """No more messages for this run: closing stdin lets claude exit after its last turn."""
+    with RUN_IO:
+        RUN["open"] = False
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
 
 
 def interrupt():
@@ -503,7 +558,11 @@ def ask_claude(messages, model):
                       f"(New message:)\n{prompt}")
 
     mcp, allowed, ask, denied, extra = run_config()
-    cmd = [CLAUDE, "-p", "--output-format", "stream-json", "--verbose",
+    # stream-json in and out: the prompt goes in on stdin, which stays open while Claude works,
+    # so messages sent meanwhile join the run (inject); --replay-user-messages echoes each one
+    # back when Claude has read it, so the bridge knows when nothing is left waiting.
+    cmd = [CLAUDE, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+           "--replay-user-messages",
            "--append-system-prompt", SYSTEM + ("\n\n" + extra if extra else "") + "\n\n" + notebook() + "\n\n" + profile(),
            "--mcp-config", mcp, "--strict-mcp-config",
            "--permission-mode", "auto", "--settings", json.dumps({"permissions": {"ask": ask}}),
@@ -513,19 +572,24 @@ def ask_claude(messages, model):
         cmd += ["--model", model]
     if resume:
         cmd += ["--resume", resume]
-    cmd += ["--", prompt]
 
     # Stream the run: every thinking block, remark and tool call goes to
     # live.json so the chat can show what Claude is doing while it works.
     live = {"busy": True, "steps": [], "started": time.time(), "at": last.get("at")}
     STEPS[:] = []
     live["steps"] = STEPS
+    RUN["live"] = live
     write_live(live)
     out, tail = None, []
     errf = tempfile.TemporaryFile(mode="w+")   # a file, not a pipe: a full pipe would stall the run
-    proc = subprocess.Popen(cmd, cwd=WORKDIR, stdout=subprocess.PIPE, stderr=errf, text=True)
-    RUN["proc"], RUN["stopped"] = proc, False
+    proc = subprocess.Popen(cmd, cwd=WORKDIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True)
+    with RUN_IO:
+        RUN.update(proc=proc, stopped=False, open=True, pending=1, said=[])
+        proc.stdin.write(_user_line(prompt))
+        proc.stdin.flush()
+    answers = []
     sid = resume
+    tasks, last_type = set(), ""   # background tasks still running; the last event's type
     killer = threading.Timer(TIMEOUT, proc.kill) if TIMEOUT else None
     if killer:
         killer.start()
@@ -536,18 +600,34 @@ def ask_claude(messages, model):
                 ev = json.loads(line)
             except ValueError:
                 continue
+            if ev.get("type") in ("assistant", "user", "result"):
+                last_type = ev.get("type")
             if ev.get("type") == "system" and ev.get("subtype") == "init":
                 sid = ev.get("session_id") or sid
+            elif ev.get("type") == "system" and ev.get("subtype") == "task_started" and ev.get("task_id"):
+                tasks.add(ev["task_id"])   # a background agent/command: keep the run open for it
+            elif ev.get("type") == "system" and ev.get("subtype") == "task_notification":
+                if str(ev.get("status") or "") not in ("running", "pending"):
+                    tasks.discard(ev.get("task_id"))
+                    if not tasks and last_type == "result":
+                        _idle_close(proc)   # done, and no turn came for it: let the run end
             elif ev.get("type") == "assistant":
+                RUN["turns"] = RUN.get("turns", 0) + 1
                 for block in (ev.get("message") or {}).get("content") or []:
                     st = step_of(block)
                     if st:
                         STEPS.append(st)
-                        del STEPS[:-200]         # in place: live["steps"] is STEPS
+                        del STEPS[:-60]          # in place: live["steps"] is STEPS (a long run stuttered the chat)
                         write_live(live)
             elif ev.get("type") == "user":
+                content = (ev.get("message") or {}).get("content") or []
+                # a message of yours (the prompt, or one sent mid-run) echoed back: Claude has it
+                if isinstance(content, str) or any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+                    with RUN_IO:
+                        RUN["pending"] = max(0, RUN["pending"] - 1)
+                    continue
                 # tool results: an approval you answered becomes a record of what happened
-                for block in (ev.get("message") or {}).get("content") or []:
+                for block in content:
                     card = card_of(block) if isinstance(block, dict) else None
                     if not card and isinstance(block, dict) and block.get("type") == "tool_result":
                         # any other tool: its result goes on its line (opened in the chat)
@@ -572,10 +652,21 @@ def ask_claude(messages, model):
                         write_live(live)
             elif ev.get("type") == "result":
                 out = ev
+                if ev.get("result"):
+                    answers.append(str(ev.get("result")))
+                # a message that came in after Claude's last tool step starts one more turn;
+                # with nothing left waiting, close the input and let the run end
+                # background agents die with the process: wait for them (their notification
+                # starts a turn of its own, and that turn's result closes the run)
+                with RUN_IO:
+                    done = RUN["pending"] <= 0 and not tasks
+                if done or ev.get("is_error"):
+                    _close_input(proc)
         proc.wait()
     finally:
         if killer:
             killer.cancel()   # live.json is closed by do_POST, together with the reply
+        _close_input(proc)
         RUN["proc"] = None
     if RUN["stopped"]:
         # stopped from the chat: keep the session so the next message carries on from here
@@ -591,7 +682,8 @@ def ask_claude(messages, model):
         raise RuntimeError((err or "".join(tail) or "no output from claude").strip()[:400])
     if out.get("is_error"):
         raise RuntimeError(str(out.get("result") or out.get("subtype"))[:400])
-    reply = out.get("result", "")
+    # more than one turn (a message arrived after the last tool step): one reply, in order
+    reply = "\n\n---\n\n".join(answers) if len(answers) > 1 else out.get("result", "")
     save_state({"session_id": out.get("session_id"), "last_reply": reply})
     return reply
 
@@ -613,6 +705,24 @@ class Handler(BaseHTTPRequestHandler):
             if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
                 return self.reply(401, {"error": "bad token"})
             return self.reply(200, {"stopped": interrupt()})
+        if self.path.rstrip("/") == "/v1/inject":
+            if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
+                return self.reply(401, {"error": "bad token"})
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(min(n, 1024 * 1024)) or b"{}")
+                text = str(body.get("text", ""))
+                files = [str(f) for f in body.get("files") or [] if os.path.isfile(os.path.expanduser(str(f)))]
+            except (ValueError, AttributeError):
+                return self.reply(400, {"error": "bad request"})
+            ok = inject(with_files(text, files))
+            if ok:
+                # your bubble, where it went into the run: the text, and the files as thumbnails
+                STEPS.append({"k": "you", "t": text[:4000], "f": "\n".join(files)})
+                RUN.setdefault("said", []).append(with_files(text, files))
+                if RUN.get("live"):
+                    write_live(RUN["live"])
+            return self.reply(200, {"injected": ok})
         if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
             return self.reply(404, {"error": "not found"})
         if not secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + TOKEN):
@@ -638,9 +748,10 @@ class Handler(BaseHTTPRequestHandler):
         # remarks, the tools it ran (with what they returned) and the actions you approved -
         # so nothing changes when it finishes (the last remark is usually the reply itself,
         # so it's left out)
-        timeline = [st for st in STEPS if st.get("k") in ("text", "tool", "card")]
+        timeline = [st for st in STEPS if st.get("k") in ("text", "tool", "card", "you")]
         if msgs and not str(answer).startswith("Claude bridge error"):
-            journal_add(text_of(msgs[-1].get("content")), answer,
+            said = "".join(f"\n\n(While Claude worked:) {t}" for t in RUN.get("said", []))
+            journal_add(text_of(msgs[-1].get("content")) + said, answer,
                         [st.get("t", "") for st in STEPS if st.get("k") == "tool"])
         if timeline and timeline[-1].get("k") == "text" and answer.strip().startswith(timeline[-1]["t"][:200]):
             timeline.pop()
